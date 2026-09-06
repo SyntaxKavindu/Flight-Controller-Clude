@@ -112,7 +112,7 @@ public:
 	//
 	// No-op until a levelling calibration has succeeded or been restored.
 	void correctBoardFrame(Vector3f &v) const;
-	Mat3f getBoardRotation() const { return _boardRotation; }
+	Matrix3f getBoardRotation() const { return _boardRotation; }
 
 	// Six-position accelerometer calibration: call this, then drive it with
 	// setAccelPosition() + calibrateAccelerometer() for each orientation.
@@ -212,10 +212,10 @@ public:
 	// Also useful to a ground-station or config tool that needs to build or
 	// validate a record without an MCU.
 	static uint16_t recordCrc(const CalibrationRecord &rec);
-	static void packRecord(const Vector3f &offset, const Mat3f &matrix,
+	static void packRecord(const Vector3f &offset, const Matrix3f &matrix,
 			CalibrationRecord &out);
 	static bool unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-			Mat3f &matrix);
+			Matrix3f &matrix);
 
 private:
 	AccelerometerCalibrator _accelerometerCalibrator;
@@ -251,12 +251,12 @@ private:
 	// has no estimator state behind it, so the facade has to own the gains for
 	// the boot path and the just-calibrated path to behave identically.
 	Vector3f _accelOffset;
-	Mat3f    _accelMatrix;
+	Matrix3f    _accelMatrix;
 	Vector3f _compassOffset;
-	Mat3f    _compassMatrix;
+	Matrix3f    _compassMatrix;
 	// Rotation from measured board axes to airframe axes; identity until a
 	// levelling calibration succeeds.
-	Mat3f    _boardRotation;
+	Matrix3f    _boardRotation;
 
 	// Pull the finished gains out of a calibrator into the affine form above.
 	void adoptAccelResult();
@@ -286,7 +286,7 @@ private:
 	// Telemetry only frames and queues lines now, so the records the
 	// calibration result is reported as are built here.
 	void sendVector(const char *key, const Vector3f &v);
-	void sendMatrix(const char *key, const Mat3f &m);
+	void sendMatrix(const char *key, const Matrix3f &m);
 
 	Calibrator_StatusTypeDef loadAccelCalibrationData();
 	Calibrator_StatusTypeDef loadCompassCalibrationData();
@@ -298,9 +298,9 @@ private:
 
 
 	Calibrator_StatusTypeDef loadRecord(EEPROMLocation location,
-			Vector3f &offset, Mat3f &matrix);
+			Vector3f &offset, Matrix3f &matrix);
 	Calibrator_StatusTypeDef saveRecord(EEPROMLocation location,
-			const Vector3f &offset, const Mat3f &matrix);
+			const Vector3f &offset, const Matrix3f &matrix);
 };
 
 // The one calibrator. Telemetry drives it; the sensor frontends feed and

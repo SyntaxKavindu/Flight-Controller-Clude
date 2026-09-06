@@ -128,7 +128,7 @@ public:
     Vector3f correct(const Vector3f &raw) const;
     Vector3f getOffset() const { return _offset; }
     float getNominalRadius() const { return _nominal_radius; }
-    Mat3f getSoftIronMatrix() const { return _softiron; }
+    Matrix3f getSoftIronMatrix() const { return _softiron; }
 
     void reset();
 
@@ -168,7 +168,7 @@ private:
     CalStatus _status;
 
     Vector3f _offset;
-    Mat3f _softiron;
+    Matrix3f _softiron;
 
     // Approximate centre of the collected cloud -- the origin until the first
     // sample lands. A first-order stand-in for the hard-iron offset, which is
@@ -179,7 +179,7 @@ private:
     // RMS deviation of the corrected samples from the nominal magnitude,
     // relative to it. Computed against the candidate gains, before they are
     // committed to _offset/_softiron.
-    float fitResidual(const Vector3f &offset, const Mat3f &softiron) const;
+    float fitResidual(const Vector3f &offset, const Matrix3f &softiron) const;
     // Recompute the whole bin table about the current centroid, dropping the
     // samples the new binning makes redundant.
     void rebin();
@@ -193,8 +193,8 @@ private:
     static uint8_t getBinIndex(const Vector3f &s);
 
     static bool solve9x9(float A[9][9], float b[9], float x[9]);
-    static bool invert3x3(const Mat3f &in, Mat3f &out);
-    static void eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f &eigvec);
+    static bool invert3x3(const Matrix3f &in, Matrix3f &out);
+    static void eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec);
 };
 
 #endif /* CALIBRATORS_COMPASSCALIBRATOR_HPP_ */

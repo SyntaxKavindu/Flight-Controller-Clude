@@ -25,7 +25,7 @@ void CompassCalibrator::reset() {
     _nominal_radius = 500.0f;
     _status = CalStatus::IDLE;
     _offset = Vector3f();
-    _softiron = Mat3f::identity();
+    _softiron = Matrix3f::identity();
 }
 
 bool CompassCalibrator::begin(float nominal_field_magnitude,
@@ -116,7 +116,7 @@ float CompassCalibrator::scatterAnisotropy() const {
 
     const Vector3f c = centroid();
 
-    Mat3f M = Mat3f();
+    Matrix3f M = Matrix3f();
     for (int i = 0; i < 3; i++) {
         for (int j = 0; j < 3; j++) M.m[i][j] = 0.0f;
     }
@@ -133,7 +133,7 @@ float CompassCalibrator::scatterAnisotropy() const {
     }
 
     float eig[3];
-    Mat3f vec;
+    Matrix3f vec;
     eigenSymmetric3x3(M, eig, vec);
 
     float mn = eig[0], mx = eig[0];
@@ -357,7 +357,7 @@ bool CompassCalibrator::solve9x9(float A[9][9], float b[9], float x[9]) {
     return true;
 }
 
-bool CompassCalibrator::invert3x3(const Mat3f &in, Mat3f &out) {
+bool CompassCalibrator::invert3x3(const Matrix3f &in, Matrix3f &out) {
     const float a = in.m[0][0], b = in.m[0][1], c = in.m[0][2];
     const float d = in.m[1][0], e = in.m[1][1], f = in.m[1][2];
     const float g = in.m[2][0], h = in.m[2][1], i = in.m[2][2];
@@ -386,7 +386,7 @@ bool CompassCalibrator::invert3x3(const Mat3f &in, Mat3f &out) {
     return true;
 }
 
-static inline void jacobiRotate(Mat3f &m, Mat3f &v, int p, int q) {
+static inline void jacobiRotate(Matrix3f &m, Matrix3f &v, int p, int q) {
     if (fabsf(m.m[p][q]) < 1e-12f) return;
 
     float theta = (m.m[q][q] - m.m[p][p]) / (2.0f * m.m[p][q]);
@@ -416,8 +416,8 @@ static inline void jacobiRotate(Mat3f &m, Mat3f &v, int p, int q) {
     }
 }
 
-void CompassCalibrator::eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f &eigvec) {
-    eigvec = Mat3f::identity();
+void CompassCalibrator::eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec) {
+    eigvec = Matrix3f::identity();
 
     // Convergence measured against the size of the matrix. An absolute
     // threshold would either never be met or be met immediately, depending
@@ -440,7 +440,7 @@ void CompassCalibrator::eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f &eigve
 }
 
 float CompassCalibrator::fitResidual(const Vector3f &offset,
-        const Mat3f &softiron) const {
+        const Matrix3f &softiron) const {
     if (_sample_count == 0) return 0.0f;
 
     const float R = (_nominal_radius > COMPASS_CAL_MIN_RADIUS) ? _nominal_radius : 1.0f;
@@ -520,14 +520,14 @@ CalStatus CompassCalibrator::calibrate() {
         return _status;
     }
 
-    Mat3f M;
+    Matrix3f M;
     M.m[0][0] = p[0]; M.m[0][1] = p[3]; M.m[0][2] = p[4];
     M.m[1][0] = p[3]; M.m[1][1] = p[1]; M.m[1][2] = p[5];
     M.m[2][0] = p[4]; M.m[2][1] = p[5]; M.m[2][2] = p[2];
 
     Vector3f n(p[6], p[7], p[8]);
 
-    Mat3f Minv;
+    Matrix3f Minv;
     if (!invert3x3(M, Minv)) {
         _status = CalStatus::FAILED_SINGULAR_MATRIX;
         return _status;
@@ -544,10 +544,10 @@ CalStatus CompassCalibrator::calibrate() {
         _status = CalStatus::FAILED_DEGENERATE_ELLIPSOID;
         return _status;
     }
-    Mat3f MK = M.scaled(1.0f / K);
+    Matrix3f MK = M.scaled(1.0f / K);
 
     float eigval[3];
-    Mat3f eigvec;
+    Matrix3f eigvec;
     eigenSymmetric3x3(MK, eigval, eigvec);
 
     // Reject anything that is not a genuine ellipsoid: a non-positive
@@ -572,10 +572,10 @@ CalStatus CompassCalibrator::calibrate() {
 
     // Every element written explicitly. Only the diagonal carries a value, and
     // the square root below is wrong unless the rest are zero, so this must
-    // not depend on how common.hpp happens to default-construct a Mat3f --
-    // `Mat3f D{}` zeroes an aggregate but calls a user-provided default
+    // not depend on how common.hpp happens to default-construct a Matrix3f --
+    // `Matrix3f D{}` zeroes an aggregate but calls a user-provided default
     // constructor, which may leave the members uninitialised.
-    Mat3f D = Mat3f();
+    Matrix3f D = Matrix3f();
     D.m[0][0] = 0.0f; D.m[0][1] = 0.0f; D.m[0][2] = 0.0f;
     D.m[1][0] = 0.0f; D.m[1][1] = 0.0f; D.m[1][2] = 0.0f;
     D.m[2][0] = 0.0f; D.m[2][1] = 0.0f; D.m[2][2] = 0.0f;
@@ -586,7 +586,7 @@ CalStatus CompassCalibrator::calibrate() {
     // Symmetric (rotation-free) square root of M/K: it maps the ellipsoid onto
     // a sphere without also rotating the sensor frame, which is what keeps the
     // corrected axes aligned with the physical ones.
-    const Mat3f softiron = eigvec.mul(D).mul(eigvec.transposed());
+    const Matrix3f softiron = eigvec.mul(D).mul(eigvec.transposed());
     const Vector3f offset = V * R + C;
 
     // Last gate, and the only one that looks at how well the answer fits the
