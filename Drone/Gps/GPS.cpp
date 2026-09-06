@@ -71,7 +71,7 @@ void GPS::setAntennaOffset(const Vector3f &offsetBody) {
 
 // Parameter names deliberately kept off the estimator's own globals: this
 // takes a snapshot, it does not reach back into the filter.
-void GPS::setBodyState(const Matrix3f &R_bn, const Vector3f &gyroBody) {
+void GPS::setBodyState(const Mat3f &R_bn, const Vector3f &gyroBody) {
 	_R_bn = R_bn;
 	_gyro = gyroBody;
 	_hasBodyState = true;
@@ -121,7 +121,9 @@ void GPS::applyLeverArm(GPS_Data &data) {
 	}
 
 	// --- position: p_body = p_antenna - R_bn * r ---------------------------
-	const Vector3f offsetNED = _R_bn * _antennaOffset; // metres, N/E/D
+	// Mat3f spells matrix-vector product as .mul(), as it does everywhere else
+	// in this tree (ESEKF, Calibrator, LevelCalibrator); there is no operator*.
+	const Vector3f offsetNED = _R_bn.mul(_antennaOffset); // metres, N/E/D
 
 	const double latRad = data.latitude * DEG_TO_RAD;
 	const double sinLat = std::sin(latRad);
@@ -145,7 +147,7 @@ void GPS::applyLeverArm(GPS_Data &data) {
 
 	// --- speed: v_body = v_antenna - R_bn * (omega x r) --------------------
 #if GPS_DATA_HAS_COURSE
-	const Vector3f velocityError = _R_bn * crossProduct(_gyro, _antennaOffset);
+	const Vector3f velocityError = _R_bn.mul(crossProduct(_gyro, _antennaOffset));
 
 	const double courseRad = data.course * DEG_TO_RAD;
 	const double velN = data.speed * std::cos(courseRad) - velocityError.x;

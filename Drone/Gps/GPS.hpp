@@ -9,8 +9,10 @@
 #define GPS_GPS_HPP_
 
 #include "NEOM8N.hpp"
-#include "Vector3f.hpp"
-#include "Matrix3f.hpp"
+// This used to include a "Matrix3f.hpp" that does not exist and never did, so
+// nothing here had ever been compiled. The matrix type in this tree is Mat3f,
+// declared in MathTypes.hpp alongside Vector3f and Quaternionf.
+#include "MathTypes.hpp"
 
 // A GPS fix is a position on Earth, and these are the bounds of that. Anything
 // outside is a parse that went wrong or a module talking rubbish.
@@ -77,7 +79,7 @@ public:
 	// Skipping it is safe: the correction is then skipped too, rather than run
 	// with an assumed-level attitude, which would be wrong in exactly the
 	// manoeuvres where the lever arm matters most.
-	void setBodyState(const Matrix3f &R_bn, const Vector3f &gyroBody);
+	void setBodyState(const Mat3f &R_bn, const Vector3f &gyroBody);
 
 	// Drains the module and stores the fix if it is plausible.
 	void update(void);
@@ -114,7 +116,7 @@ private:
 
 	Vector3f _antennaOffset;
 	// Meaningless until _hasBodyState; every use of them is gated on it.
-	Matrix3f _R_bn;
+	Mat3f _R_bn;
 	Vector3f _gyro;
 	bool _hasBodyState;
 	bool _leverArmApplied;
