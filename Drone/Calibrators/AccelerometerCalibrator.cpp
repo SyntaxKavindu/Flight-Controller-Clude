@@ -31,6 +31,8 @@ void AccelerometerCalibrator::reset() {
     _best_progress = -1.0f;
     _samples_since_progress = 0;
 
+    _samples = nullptr;
+    _capacity = 0;
     _sample_count = 0;
     _filled_bins = 0;
     memset(_bin_count, 0, sizeof(_bin_count));
@@ -53,8 +55,20 @@ void AccelerometerCalibrator::beginSixPosition(float motion_threshold) {
     _status = AccelCalStatus::IN_PROGRESS;
 }
 
-void AccelerometerCalibrator::beginTumble(float nominal_g, float stillness_threshold) {
+bool AccelerometerCalibrator::beginTumble(float nominal_g, float stillness_threshold,
+                                          Vector3f *sample_buffer, uint16_t capacity) {
     reset();
+
+    // A buffer too small to reach the minimum sample count would collect
+    // happily and then fail the fit for ever, with progress stuck just under
+    // 100%. Refuse at the start, where the caller can still report it, rather
+    // than at the end where it looks like an operator error.
+    if (sample_buffer == nullptr || capacity < ACCEL_CAL_TUMBLE_MIN_SAMPLES) {
+        return false;
+    }
+    _samples  = sample_buffer;
+    _capacity = capacity;
+
     _mode = AccelCalMode::TUMBLE;
     // _nominal_radius normalises the ellipsoid fit and divides in correct(),
     // so it has to be strictly positive. Validating it here means calibrate()
@@ -67,6 +81,7 @@ void AccelerometerCalibrator::beginTumble(float nominal_g, float stillness_thres
         _stillness_threshold_sq = stillness_threshold * stillness_threshold;
     }
     _status = AccelCalStatus::IN_PROGRESS;
+    return true;
 }
 
 void AccelerometerCalibrator::startPosition(AccelPosition pos) {
@@ -246,7 +261,7 @@ uint8_t AccelerometerCalibrator::getBinIndex(const Vector3f &s) {
 }
 
 AccelSampleResult AccelerometerCalibrator::addSampleTumble(const Vector3f &s) {
-    if (_sample_count >= ACCEL_CAL_TUMBLE_MAX_SAMPLES) {
+    if (_samples == nullptr || _sample_count >= _capacity) {
         return AccelSampleResult::REJECTED_BUFFER_FULL;
     }
     _window[_window_head] = s;

@@ -8,7 +8,9 @@
 #ifndef ESEKF_ESEKF_HPP_
 #define ESEKF_ESEKF_HPP_
 
-#include "common.hpp"
+// Maths types only -- deliberately NOT common.hpp, which drags in the STM32
+// HAL. This class is pure algorithm and must stay portable; see MathTypes.hpp.
+#include "MathTypes.hpp"
 
 // ---------------------------------------------------------------------------
 // BUILD AND USAGE CONTRACT -- read before integrating.
@@ -97,10 +99,28 @@ public:
 	void reset();                       // reset state and covariance to defaults
 	bool isInitialized() const;
 
-	// True once the state or covariance has gone non-finite. A diverged filter
-	// refuses all further predict()/update() calls; the caller must reset() and
-	// re-initialize(). Poll this from the flight-control loop.
+	// True once the filter has gone non-finite WITH NOTHING TO FALL BACK ON.
+	// A diverged filter refuses all further predict()/update() calls; the caller
+	// must reset() and re-initialize(). Poll this from the flight-control loop.
+	//
+	// This is deliberately hard to reach. A numerical fault after alignment is
+	// REPAIRED rather than latched -- see getFaultCount() -- because latching in
+	// flight leaves an aircraft with no attitude and no way back: recovery needs
+	// a re-alignment, re-alignment needs a stationary airframe to read gravity
+	// from, and an aircraft that has just lost its estimate is the opposite of
+	// stationary. In practice this only latches on a garbage ALIGNMENT, which
+	// happens on the ground, where refusing to fly is the correct answer.
 	bool hasDiverged() const;
+
+	// Number of numerical faults REPAIRED since power-on: times the state or
+	// covariance went non-finite and the filter rolled back to its last good
+	// nominal state and re-seeded the covariance instead of dying.
+	//
+	// Monotone for the life of the object -- neither reset() nor initialize()
+	// clears it, because it is evidence about the airframe, not filter state.
+	// It should read zero forever; anything else is a bug worth chasing, and
+	// without this counter the repair would be completely silent.
+	uint32_t getFaultCount() const;
 
 	// ---- Filter status / integrity (poll this from the flight controller) ----
 	ESEKFStatus getStatus() const;
@@ -171,8 +191,24 @@ public:
 	// non-finite input, blocked by the motion gate, or blocked by the innovation
 	// consistency gate -- and true if it was actually fused.
 	bool updateAccelerometer(const Vector3f &accel);
-	bool updateMagnetometer(const Vector3f &mag);
 	bool updateBarometer(float altitude);
+
+	// Magnetometer. Takes the calibrated field as a body-frame 3-vector in
+	// whatever unit the sensor reports, and fuses HEADING ONLY: one scalar,
+	// with a Jacobian along the earth vertical. Roll and pitch are structurally
+	// immune to it -- a magnetic disturbance can rotate the estimate about the
+	// vertical and do nothing else, whatever the sensor reads.
+	//
+	// That is not a simplification, it is the correct model for this filter.
+	// Gravity already fixes two of the three attitude axes; the magnetometer is
+	// only needed for the third. Fusing the field as a 3-vector against a
+	// reference fixed at alignment -- with no earth-field states to absorb the
+	// difference -- feeds every local anomaly into roll and pitch as well. See
+	// the note in updateMagnetometer().
+	//
+	// Returns false, and leaves yaw unaided, when the field is too weak or too
+	// close to vertical to carry a heading.
+	bool updateMagnetometer(const Vector3f &mag);
 
 	// gps = {latitude, longitude, altitude}. UNITS: lat/lon in RADIANS, altitude
 	// in metres. Most GPS drivers (NMEA, u-blox UBX-NAV-PVT) emit DEGREES --
@@ -288,6 +324,14 @@ public:
 
 	// ---- Measurement noise getters / setters ----
 	void setAccelNoise(const float R[3][3]);
+
+	// Magnetometer noise, as a covariance in the sensor's own field units --
+	// the same units updateMagnetometer() is fed. Only the diagonal average is
+	// used: the fusion is scalar (heading), so the field-unit variance is
+	// converted to a heading variance by dividing by the squared horizontal
+	// field strength, which is the correct conversion and also makes a weak
+	// horizontal field automatically trusted less. Keeping the setter in field
+	// units means a caller tunes against a number the datasheet quotes.
 	void setMagNoise(const float R[3][3]);
 	void setBaroNoise(float variance);
 	void setGPSNoise(const float R[3][3]);
@@ -307,9 +351,28 @@ public:
 	// m/s^2 (the vehicle is assumed to be under real acceleration, not just
 	// gravity, so the reading is not a trustworthy "up" reference). Default
 	// is set in the constructor; tune tighter to reject more motion, looser
-	// to keep correcting through vibration/maneuvering.
+	// to keep correcting through vibration/maneuvering. Set <= 0 to disable
+	// the gate, which also disables the noise inflation below.
 	void setAccelGateThreshold(float threshold_mps2);
 	float getAccelGateThreshold() const;
+
+	// | |accel| - |g| | from the most recent updateAccelerometer() call,
+	// whether it was fused or gated out. This is the quantity the gate above is
+	// compared against, so it is the number to tune the gate FROM: hover the
+	// vehicle, read this, and set the gate just above the value it settles at.
+	float getAccelMotion() const;
+
+	// Variance multiplier R_accel was scaled by for the most recently FUSED
+	// accelerometer sample; sqrt() it for the sigma multiplier. Always >= 1.
+	//
+	// A bare threshold is a cliff: a sample just inside it is trusted in full
+	// and one just outside is thrown away entirely, so a vehicle sitting near
+	// the gate flips between full aiding and none from cycle to cycle. Instead
+	// the measurement noise is inflated smoothly with how far into the gate the
+	// sample sits, so a marginal sample is de-weighted rather than trusted or
+	// discarded outright, and the gate only draws the line where the reading
+	// stops being a gravity reference at all.
+	float getLastAccelNoiseInflation() const;
 
 	// ---- Reference / environment getters / setters ----
 	void setGravity(const Vector3f &g0);
@@ -386,6 +449,8 @@ private:
 	float R_gps[3][3];     // 3x3 GPS position measurement noise covariance
 	float R_gps_vel[3][3]; // 3x3 GPS velocity (NED) measurement noise covariance
 	float accel_gate_threshold_; // m/s^2, see setAccelGateThreshold()
+	float accel_motion_;         // | |accel| - |g| | from the last update attempt
+	float accel_inflation_;      // R_accel multiplier used by the last fused sample
 
 	// IMU continuous-time noise parameters (datasheet / Allan-variance figures).
 	// Kept alongside Q so the values used to derive it are inspectable/reusable,
@@ -412,7 +477,22 @@ private:
 
 	// Bookkeeping
 	bool initialized_;
-	bool diverged_;     // latched once the state or P goes non-finite
+	bool diverged_;     // latched only when a fault has no last-good state to fall back on
+
+	// ---- Numerical fault recovery ----
+	// The last NOMINAL state that passed checkFinite(), and nothing else: 16
+	// floats, refreshed on every healthy predict()/update(). Snapshotting P too
+	// would be 900 more floats copied at the loop rate for no benefit -- a
+	// covariance that has gone bad is not worth restoring, and resetting it to
+	// the initial diagonal is both cheaper and the honest statement of what the
+	// filter knows after a fault (see checkFinite()).
+	Quaternionf last_good_q_;
+	Vector3f    last_good_velocity_;
+	Vector3f    last_good_position_;
+	Vector3f    last_good_gyro_bias_;
+	Vector3f    last_good_accel_bias_;
+	bool        have_last_good_;  // false until the first healthy check after alignment
+	uint32_t    fault_count_;     // repairs performed; see getFaultCount()
 	float dt_last_;
 	float altitude_;    // last raw barometer altitude reading (not the filter's estimate -- see getAltitude())
 	float baro_ref_;    // barometer datum -- the raw reading at initialize(). See setBaroReference().
@@ -514,6 +594,15 @@ private:
 	bool kalmanUpdateScalar(float innovation, int state_index, float h, float r,
 	                         bool force_fuse = false);
 
+	// Scalar update whose Jacobian is non-zero on exactly one 3-state block,
+	// H = [0.. h3 ..0] starting at `first_state`. The magnetometer's heading
+	// measurement is this shape: one number, observing a direction in the
+	// attitude block. kalmanUpdateScalar() cannot express it (its H has a single
+	// non-zero ELEMENT) and the 3-vector kalmanUpdate() would need a 3x3 inverse
+	// to fuse one scalar. Joseph form, O(N^2), 60 bytes of scratch.
+	bool kalmanUpdateScalarVec3(float innovation, int first_state, const float h3[3],
+	                             float r, bool force_fuse = false);
+
 	// True if `last_reject_t` shows this source has been continuously gated out
 	// for longer than ESEKF_GATE_RECOVERY_TIMEOUT, meaning the next sample must
 	// be fused regardless of the gate to break the lockout.
@@ -536,7 +625,13 @@ private:
 	void injectAndResetCovariance(const float dx[ESEKF_STATE_DIM]);
 
 	void symmetrizeCovariance();  // P <- 0.5 * (P + P^T)
-	bool checkFinite();           // latches diverged_ if the state or P is non-finite
+
+	// Health check run after every propagation and every fusion. Returns true
+	// while the filter is healthy, and on the way through captures the nominal
+	// state as the rollback point. On a fault it REPAIRS -- rolls the nominal
+	// state back and re-seeds P -- and only latches diverged_ when there is no
+	// rollback point yet, which means the fault came from alignment itself.
+	bool checkFinite();
 };
 
 #endif /* ESEKF_ESEKF_HPP_ */

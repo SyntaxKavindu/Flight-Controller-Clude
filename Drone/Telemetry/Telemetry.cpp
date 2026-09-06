@@ -10,6 +10,7 @@
 
 #include <cstdio>
 #include <cstdarg>
+#include <cstdlib> // strtof, for CALLEVEL's optional yaw argument
 
 // Declared here rather than by including usbd_cdc_if.h so this unit does not
 // drag the USB middleware in. Returns USBD_OK (0) on success, USBD_BUSY (1)
@@ -176,7 +177,10 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		return;
 	}
 
-	const bool busy = calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating();
+	// Every procedure, not just the two the original checks knew about. A
+	// levelling run left out of this was startable on top of an accelerometer
+	// calibration, and CANCEL answered "$NAK,IDLE" while one was in progress.
+	const bool busy = calibrator.isCalibrating();
 
 	if (tokenEquals(name, "CALIMU")) {
 		const bool tumble = (arg != nullptr) && tokenEquals(arg, "TUMBLE");
@@ -198,6 +202,31 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		if (busy) { send("$NAK,%s,BUSY", echo); return; }
 		send("$ACK,%s", echo);
 		calibrator.startCompassCalibration();
+		return;
+	}
+
+	if (tokenEquals(name, "CALLEVEL")) {
+		if (busy) { send("$NAK,%s,BUSY", echo); return; }
+
+		// Optional mounting yaw, in degrees. Gravity cannot observe rotation
+		// about the vertical, so if the board is bolted in at a known angle it
+		// has to be supplied here -- see LevelCalibrator::begin(). Absent, the
+		// run corrects roll and pitch only, which is the common case.
+		float yaw_deg = 0.0f;
+		if (arg != nullptr && *arg != '\0') {
+			char *end = nullptr;
+			const float parsed = strtof(arg, &end);
+			// Reject trailing junk rather than silently levelling against half a
+			// number: strtof stops at the first bad character and reports
+			// success for "12abc".
+			if (end == arg || *end != '\0') {
+				send("$NAK,%s,BADARG", echo);
+				return;
+			}
+			yaw_deg = parsed;
+		}
+		send("$ACK,%s", echo);
+		calibrator.startLevelCalibration(yaw_deg);
 		return;
 	}
 
@@ -240,6 +269,8 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 				calibrator.isAcclCalibrating() ? "BUSY" : "IDLE");
 		send("$STATUS,MAG,%s,%s", calibrator.isCompassCalibrated() ? "CAL" : "UNCAL",
 				calibrator.isCompassCalibrating() ? "BUSY" : "IDLE");
+		send("$STATUS,LEVEL,%s,%s", calibrator.isLevelCalibrated() ? "CAL" : "UNCAL",
+				calibrator.isLevelCalibrating() ? "BUSY" : "IDLE");
 		return;
 	}
 

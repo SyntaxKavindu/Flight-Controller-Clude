@@ -13,13 +13,19 @@
 #include <cstring> // memset, memcmp
 #include <cmath>   // std::isfinite
 
+// Member order here follows the declaration order in the header -- the compiler
+// initialises in declaration order regardless of what is written, so a list in
+// a different order reads as a lie about what happens. _levelCalibrator was
+// missing from this list entirely; it worked only because its constructor
+// calls reset(), which is not a property to depend on silently.
 Calibrator::Calibrator() :
-		_accelerometerCalibrator { }, _compassCalibrator { }, _storage {
-				nullptr }, _isAccelCalibrating { false },
-				_isCompassCalibrating { false }, _isLevelCalibrating { false },
-				_isAccelCalibrated { false }, _isCompassCalibrated { false },
-				_isLevelCalibrated { false }, _lastSaveFailed { false },
-				_awaitingPosition { false }, _progressThrottle { 0 },
+		_accelerometerCalibrator { }, _compassCalibrator { },
+				_levelCalibrator { }, _storage { nullptr },
+				_isAccelCalibrating { false }, _isCompassCalibrating { false },
+				_isLevelCalibrating { false }, _isAccelCalibrated { false },
+				_isCompassCalibrated { false }, _isLevelCalibrated { false },
+				_lastSaveFailed { false }, _awaitingPosition { false },
+				_progressThrottle { 0 }, _calibrationEpoch { 0 },
 				_accelOffset { }, _accelMatrix { Mat3f::identity() },
 				_compassOffset { }, _compassMatrix { Mat3f::identity() },
 				_boardRotation { Mat3f::identity() } {
@@ -48,6 +54,10 @@ void Calibrator::init(EEPROM *storage) {
 	_isAccelCalibrated = (loadAccelCalibrationData() == Calibrator_StatusTypeDef::OK);
 	_isCompassCalibrated = (loadCompassCalibrationData() == Calibrator_StatusTypeDef::OK);
 	_isLevelCalibrated = (loadLevelCalibrationData() == Calibrator_StatusTypeDef::OK);
+
+	// Restoring from EEPROM changes the applied correction just as much as
+	// running a procedure does, and init() may be called on a live system.
+	noteGainsChanged();
 }
 
 void Calibrator::correctAcclData(Vector3f &acclData) {
@@ -80,10 +90,26 @@ void Calibrator::correctBoardFrame(Vector3f &v) const {
 	v = _boardRotation.mul(v);
 }
 
+// Two procedures running at once would feed each other's samples through the
+// wrong gates and both would store gains derived from the mixture, so every
+// entry point refuses here rather than each caller remembering to check.
+bool Calibrator::beginProcedure(const char *stage) {
+	if (isCalibrating()) {
+		telemetry.send("$CAL,%s,FAIL,BUSY", stage);
+		return false;
+	}
+	_awaitingPosition = false;
+	_progressThrottle = 0;
+	_lastSaveFailed = false;
+	return true;
+}
+
 void Calibrator::startAccelerometerCalibration() {
+	if (!beginProcedure("ACCL")) {
+		return;
+	}
 	_isAccelCalibrating = true;
 	_isAccelCalibrated = false;
-	_progressThrottle = 0;
 	// beginSixPosition() resets the calibrator itself, so no separate reset().
 	_accelerometerCalibrator.beginSixPosition(CALIBRATOR_ACCEL_MOTION_THRESHOLD);
 
@@ -92,23 +118,35 @@ void Calibrator::startAccelerometerCalibration() {
 }
 
 void Calibrator::startAccelerometerTumbleCalibration() {
+	if (!beginProcedure("ACCL")) {
+		return;
+	}
+	if (!_accelerometerCalibrator.beginTumble(ACCEL_CAL_STANDARD_GRAVITY,
+			CALIBRATOR_ACCEL_STILLNESS_THRESHOLD, _sampleArena,
+			CALIBRATOR_SAMPLE_ARENA)) {
+		// Only reachable if the arena is mis-sized at compile time, but a
+		// procedure that silently never finishes is the worst way to find out.
+		telemetry.send("$CAL,ACCL,FAIL,NOBUFFER");
+		return;
+	}
 	_isAccelCalibrating = true;
 	_isAccelCalibrated = false;
-	_awaitingPosition = false;
-	_progressThrottle = 0;
-	_accelerometerCalibrator.beginTumble(ACCEL_CAL_STANDARD_GRAVITY,
-			CALIBRATOR_ACCEL_STILLNESS_THRESHOLD);
 
 	telemetry.send("$INFO,ACCEL TUMBLE CALIBRATION STARTED");
 	telemetry.send("$INFO,ROTATE SLOWLY THROUGH MANY ORIENTATIONS, PAUSING IN EACH");
 }
 
 void Calibrator::startCompassCalibration() {
+	if (!beginProcedure("MAG")) {
+		return;
+	}
+	if (!_compassCalibrator.begin(CALIBRATOR_COMPASS_NOMINAL_GAUSS, _sampleArena,
+			CALIBRATOR_SAMPLE_ARENA)) {
+		telemetry.send("$CAL,MAG,FAIL,NOBUFFER");
+		return;
+	}
 	_isCompassCalibrating = true;
 	_isCompassCalibrated = false;
-	_awaitingPosition = false;
-	_progressThrottle = 0;
-	_compassCalibrator.begin(CALIBRATOR_COMPASS_NOMINAL_GAUSS);
 
 	telemetry.send("$INFO,MAG CALIBRATION STARTED");
 	telemetry.send("$INFO,TUMBLE THE AIRFRAME THROUGH AS MANY ORIENTATIONS AS POSSIBLE");
@@ -123,12 +161,29 @@ void Calibrator::startLevelCalibration(float yaw_offset_deg) {
 		telemetry.send("$INFO,CALIBRATE THE ACCELEROMETER FIRST");
 		return;
 	}
+	if (!beginProcedure("LEVEL")) {
+		return;
+	}
 
 	_isLevelCalibrating = true;
 	_isLevelCalibrated = false;
-	_awaitingPosition = false;
-	_progressThrottle = 0;
-	_levelCalibrator.begin(Vector3f(0.0f, 0.0f, 1.0f),
+
+	// THE BODY FRAME IS FRD: +Z POINTS DOWN.
+	//
+	// So the reading to expect from a level, upright airframe is (0, 0, -1),
+	// not (0, 0, +1). An accelerometer reads specific force, which at rest is
+	// minus the gravity vector: with body +Z pointing down it reports -1 g on Z.
+	// The same convention the IMU remap is derived against (see the banner in
+	// Imu.cpp: "with the drone level and at rest the ESEKF expects body accel
+	// (0, 0, -g)"), and the same one AccelPosition::Z_UP assumes -- Z_UP means
+	// the body +Z axis points at the sky, i.e. the airframe is INVERTED, and
+	// that is the orientation that reads +1 g on Z.
+	//
+	// Passing (0, 0, +1) here asked the fit to rotate the measured vertical onto
+	// its own opposite. That is a 180 degree rotation, so it failed the
+	// LEVEL_CAL_MAX_TILT_DEG check on every single run -- the procedure could
+	// never succeed, whatever the operator did.
+	_levelCalibrator.begin(Vector3f(0.0f, 0.0f, -1.0f),
 			ACCEL_CAL_STANDARD_GRAVITY, CALIBRATOR_ACCEL_MOTION_THRESHOLD,
 			yaw_offset_deg);
 
@@ -168,6 +223,7 @@ void Calibrator::finishLevelCalibration() {
 	if (status == LevelCalStatus::SUCCESS) {
 		_boardRotation = _levelCalibrator.getRotation();
 		_isLevelCalibrated = true;
+		noteGainsChanged();
 		_lastSaveFailed = (saveLevelCalibrationData() != Calibrator_StatusTypeDef::OK);
 	}
 	_isLevelCalibrating = false;
@@ -237,6 +293,7 @@ void Calibrator::finishAccelCalibration() {
 	if (status == AccelCalStatus::SUCCESS) {
 		adoptAccelResult();
 		_isAccelCalibrated = true;
+		noteGainsChanged();
 		// A failed write is not a failed calibration: the gains are live for
 		// this session either way, they just will not survive a reboot.
 		_lastSaveFailed = (saveAccelCalibrationData() != Calibrator_StatusTypeDef::OK);
@@ -336,6 +393,7 @@ void Calibrator::finishCompassCalibration() {
 	if (status == CalStatus::SUCCESS) {
 		adoptCompassResult();
 		_isCompassCalibrated = true;
+		noteGainsChanged();
 		_lastSaveFailed = (saveCompassCalibrationData() != Calibrator_StatusTypeDef::OK);
 	}
 	_isCompassCalibrating = false;
@@ -377,15 +435,19 @@ void Calibrator::reportProgress(const char *stage, float percent) {
 // how far it got before things stopped moving.
 void Calibrator::abortStalled(const char *stage, float percent,
 		const char *advice) {
-	cancelCalibration();
+	// stopProcedures() rather than cancelCalibration(): this is a FAILURE, and
+	// emitting "CANCELLED" ahead of "FAIL,STALLED" would tell the operator their
+	// own CANCEL had been received when nothing of the sort happened.
+	stopProcedures();
 
 	telemetry.send("$CAL,%s,FAIL,STALLED", stage);
 	telemetry.send("$INFO,NO PROGRESS AT %.0f%% - %s", (double) percent, advice);
 }
 
-void Calibrator::cancelCalibration() {
-	const bool was_running = _isAccelCalibrating || _isCompassCalibrating
-			|| _isLevelCalibrating;
+// Tear down whatever is running and drop its partial samples, silently.
+// Returns true if anything was actually running.
+bool Calibrator::stopProcedures() {
+	const bool was_running = isCalibrating();
 
 	if (_isAccelCalibrating) {
 		_accelerometerCalibrator.reset();
@@ -401,7 +463,11 @@ void Calibrator::cancelCalibration() {
 	}
 	_awaitingPosition = false;
 
-	if (was_running) {
+	return was_running;
+}
+
+void Calibrator::cancelCalibration() {
+	if (stopProcedures()) {
 		telemetry.send("$INFO,CALIBRATION CANCELLED");
 	}
 }
@@ -604,6 +670,7 @@ Calibrator_StatusTypeDef Calibrator::clearStoredCalibration() {
 	_compassOffset = Vector3f();
 	_compassMatrix = Mat3f::identity();
 	_boardRotation = Mat3f::identity();
+	noteGainsChanged();
 
 	if (_storage == nullptr) {
 		return Calibrator_StatusTypeDef::ERROR;

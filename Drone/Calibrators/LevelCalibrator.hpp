@@ -7,7 +7,9 @@
 #ifndef CALIBRATORS_LEVELCALIBRATOR_HPP_
 #define CALIBRATORS_LEVELCALIBRATOR_HPP_
 
-#include "common.hpp"
+// Maths types only -- deliberately NOT common.hpp, which drags in the STM32
+// HAL. This class is pure algorithm and must stay portable; see MathTypes.hpp.
+#include "MathTypes.hpp"
 
 // Board-mounting rotation.
 //

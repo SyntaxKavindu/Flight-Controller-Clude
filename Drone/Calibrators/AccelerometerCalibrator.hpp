@@ -7,9 +7,15 @@
 #ifndef CALIBRATORS_ACCELEROMETERCALIBRATOR_HPP_
 #define CALIBRATORS_ACCELEROMETERCALIBRATOR_HPP_
 
-#include "common.hpp"
+// Maths types only -- deliberately NOT common.hpp, which drags in the STM32
+// HAL. This class is pure algorithm and must stay portable; see MathTypes.hpp.
+#include "MathTypes.hpp"
 
 #define ACCEL_CAL_SAMPLES_PER_POSITION 100
+// Recommended sample-buffer capacity for a tumble -- the caller now supplies
+// the storage, so this sizes it rather than declaring an array. See
+// beginTumble(). Six-position needs no buffer at all: it keeps six running
+// averages, which is why that mode costs nothing here.
 #define ACCEL_CAL_TUMBLE_MAX_SAMPLES   300
 #define ACCEL_CAL_TUMBLE_MIN_SAMPLES   150
 #define ACCEL_CAL_STILLNESS_WINDOW     12
@@ -154,8 +160,22 @@ public:
     //            (ICM42688P is ~0.006 m/s^2), but a bench that shakes or props
     //            turning are not. If calibration stops advancing, that is what
     //            it means.
-    void beginTumble(float nominal_g = ACCEL_CAL_STANDARD_GRAVITY,
-                     float stillness_threshold = 0.2f);
+    //
+    // sample_buffer / capacity: where the tumble samples are collected. The
+    // buffer is NOT owned by this class and must outlive the procedure.
+    //
+    // It is a caller parameter rather than a member array so that the ~3.6 kB
+    // it costs is the integrator's to place. Two of these classes each holding
+    // their own array put 7.2 kB permanently in .bss for procedures that run
+    // for a few seconds on the ground and never again -- survivable on a part
+    // with 320 kB, fatal on one with 20 kB. Passing it in lets the memory be
+    // shared with the compass calibrator (they are mutually exclusive), live in
+    // a scratch/CCM region, or be a stack buffer in the calibration routine.
+    //
+    // Returns false -- and does NOT start -- if the buffer is null or smaller
+    // than ACCEL_CAL_TUMBLE_MIN_SAMPLES, which could never complete.
+    bool beginTumble(float nominal_g, float stillness_threshold,
+                     Vector3f *sample_buffer, uint16_t capacity);
 
     AccelSampleResult addSample(float x, float y, float z);
     AccelSampleResult addSample(const Vector3f &s) { return addSample(s.x, s.y, s.z); }
@@ -209,7 +229,10 @@ private:
     uint32_t _samples_since_progress;
     void noteProgress();
 
-    Vector3f _samples[ACCEL_CAL_TUMBLE_MAX_SAMPLES];
+    // Caller-owned; see beginTumble(). Null whenever no tumble is running, so a
+    // stale pointer from a finished procedure can never be dereferenced.
+    Vector3f *_samples;
+    uint16_t _capacity;
     uint16_t _sample_count;
     uint8_t _bin_count[ACCEL_CAL_TUMBLE_NUM_BINS];
     uint8_t _filled_bins;
