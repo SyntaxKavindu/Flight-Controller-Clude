@@ -151,6 +151,29 @@ inline double wrapPi(double a)
 	}
 	return a - kTwoPi * std::floor((a + kPi) / kTwoPi);
 }
+
+// Single-precision wrap, for the heading residual. Deliberately not a call
+// through the double version: the Cortex-M4F/M7F FPU this targets is
+// single-precision only, so every double operation is a software routine --
+// tens of cycles each, on a path that runs at the magnetometer rate.
+constexpr float kPiF    = 3.14159265358979f;
+constexpr float kTwoPiF = 6.28318530717959f;
+
+inline float wrapPiF(float a)
+{
+	if (a >= -kPiF && a <= kPiF)
+	{
+		return a; // the overwhelmingly common case: successive headings are close
+	}
+	return a - kTwoPiF * std::floor((a + kPiF) / kTwoPiF);
+}
+
+// Floor on the heading measurement variance, rad^2. sqrt(1e-6) is 1 mrad, or
+// 0.06 deg: past that the magnetometer would be claiming a heading better than
+// any hobby-grade part can deliver, and an over-confident yaw measurement pulls
+// the gyro-bias states with it. Reached only if the caller sets an
+// unrealistically small mag noise or the horizontal field reads very large.
+constexpr float kMinYawVariance = 1.0e-6f;
 }
 
 // ---------------------------------------------------------------------------
@@ -394,12 +417,28 @@ void ESEKF::initialize(const Vector3f &accel, const Vector3f &mag, float altitud
 	// both are exact for NED + FRD (verified against a full roll/pitch/yaw grid).
 	const float accel_norm = vectorNorm(accel);
 
-	// No gravity vector, no attitude. Levelling off a dead or saturated
-	// accelerometer would silently hand back roll = pitch = 0, which looks
-	// exactly like a vehicle that happens to be level -- and is unrecoverable,
-	// because the accelerometer update's motion gate will keep rejecting the
-	// samples that would have corrected it.
-	if (accel_norm < 1.0e-3f)
+	// The reading must actually look like gravity.
+	//
+	// Alignment takes this sample entirely on trust -- there is no prior to gate
+	// it against -- so a dead, saturated or stuck accelerometer aligns the filter
+	// just as confidently as a good one. A dead part reading zero hands back
+	// roll = pitch = 0, which is indistinguishable from a vehicle that happens to
+	// be level; a saturated one reading a huge constant gives a perfectly
+	// plausible attitude from a direction that means nothing. Both are then
+	// unrecoverable, because the accelerometer update's own motion gate rejects
+	// exactly the samples that would have corrected the error.
+	//
+	// The band is deliberately loose -- half of local gravity either way -- so it
+	// never refuses a real stationary reading from an uncalibrated part or a
+	// vehicle being held by hand. It is here to catch a broken sensor, not to
+	// judge stillness: a caller that wants a tight stillness gate should apply
+	// one before calling, which is what the vehicle layer does.
+	//
+	// Compared against |g| rather than a literal 9.81 so it stays correct for a
+	// caller working in g-units or on another body, via setGravity().
+	const float gravity_mag = vectorNorm(g);
+	if (!(gravity_mag > 1.0e-6f) ||
+	    std::fabs(accel_norm - gravity_mag) > 0.5f * gravity_mag)
 	{
 		return;
 	}
@@ -1536,6 +1575,97 @@ bool ESEKF::kalmanUpdateScalar(float innovation, int state_index, float h, float
 // idea here: once a source has been continuously rejected for longer than
 // ESEKF_GATE_RECOVERY_TIMEOUT, trust the sensor over the state.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// kalmanUpdateScalarVec3(): Joseph update for a scalar measurement whose
+// Jacobian is non-zero on one 3-state block only.
+//
+//   S   = H P H^T + r                       (scalar)
+//   K   = P H^T / S                          (15x1)
+//   P  <- (I-KH) P (I-KH)^T + K r K^T        (Joseph)
+//
+// Written out rather than reduced to P - K(HP): with the optimal gain the two
+// are algebraically identical, but only the Joseph expansion stays symmetric
+// and positive semi-definite under float32 rounding, and this filter has no
+// second chance if P goes indefinite in flight.
+// ---------------------------------------------------------------------------
+bool ESEKF::kalmanUpdateScalarVec3(float innovation, int first_state, const float h3[3],
+                                    float r, bool force_fuse)
+{
+	last_test_ratio_   = 0.0f;
+	last_update_gated_ = false;
+
+	if (!initialized_ || diverged_)
+	{
+		return false;
+	}
+	if (first_state < 0 || first_state + 3 > ESEKF_STATE_DIM)
+	{
+		return false;
+	}
+	if (!std::isfinite(innovation) || !std::isfinite(r) ||
+	    !std::isfinite(h3[0]) || !std::isfinite(h3[1]) || !std::isfinite(h3[2]))
+	{
+		return false;
+	}
+
+	const int i0 = first_state;
+
+	// hp = H P  (1x15). H is zero outside the block, so this is three rows.
+	float hp[ESEKF_STATE_DIM];
+	for (int j = 0; j < ESEKF_STATE_DIM; ++j)
+	{
+		hp[j] = h3[0] * P[i0][j] + h3[1] * P[i0 + 1][j] + h3[2] * P[i0 + 2][j];
+	}
+
+	const float hph = h3[0] * hp[i0] + h3[1] * hp[i0 + 1] + h3[2] * hp[i0 + 2];
+	const float S   = hph + r;
+	if (!(S > 1.0e-12f)) // also rejects NaN and a non-positive S
+	{
+		return false;
+	}
+	const float S_inv = 1.0f / S;
+
+	if (nis_gate_ > 0.0f)
+	{
+		const float nis = innovation * innovation * S_inv;
+		last_test_ratio_ = nis / nis_gate_;
+
+		if (!(nis <= nis_gate_))
+		{
+			last_update_gated_ = true;
+			if (!force_fuse || !std::isfinite(nis))
+			{
+				return false;
+			}
+		}
+	}
+
+	// K = P H^T / S. (P H^T)_i == (H P)_i because P is symmetric.
+	float K[ESEKF_STATE_DIM];
+	float dx[ESEKF_STATE_DIM];
+	for (int i = 0; i < ESEKF_STATE_DIM; ++i)
+	{
+		K[i]  = hp[i] * S_inv;
+		dx[i] = K[i] * innovation;
+	}
+
+	// (A P A^T + K r K^T)[i][j]
+	//     = P[i][j] - K_i hp[j] - K_j hp[i] + K_i K_j (hph + r)
+	for (int i = 0; i < ESEKF_STATE_DIM; ++i)
+	{
+		for (int j = 0; j < ESEKF_STATE_DIM; ++j)
+		{
+			P[i][j] += -K[i] * hp[j] - K[j] * hp[i] + K[i] * K[j] * S;
+		}
+	}
+
+	injectAndResetCovariance(dx);
+
+	symmetrizeCovariance();
+	checkFinite();
+	return true;
+}
+
 bool ESEKF::sourceTimedOut(double last_fuse_t, float timeout) const
 {
 	// The difference is taken in double (the clock's type) and only then
@@ -1877,38 +2007,98 @@ bool ESEKF::updateMagnetometer(const Vector3f &mag)
 		return false;
 	}
 
+	// ---- HEADING ONLY. The magnetometer must never move roll or pitch. ----
+	//
+	// This used to fuse the field as a 3-vector, z = R^T * mag_ref_, with
+	// H = [mag_ref_ in body]x on the attitude block. That is the textbook
+	// construction and it is WRONG for a filter shaped like this one, because
+	// mag_ref_ is fixed at alignment and there are no earth-field states to
+	// absorb the difference between it and the field actually present. Every
+	// discrepancy -- a local anomaly, a steel gate, current through a nearby
+	// harness, flying somewhere with a different inclination than where the
+	// vehicle was switched on -- was therefore fused as a full 3-axis attitude
+	// error, and two thirds of that correction lands in ROLL AND PITCH.
+	//
+	// A vehicle told it is banked when it is level does exactly the wrong thing.
+	// The accelerometer fights the error back, so the symptom is not a clean
+	// failure: it is attitude that leans toward magnetic clutter and recovers
+	// slowly, which is very hard to attribute in flight.
+	//
+	// Geomagnetism carries no information about tilt anyway -- gravity already
+	// fixes two axes, and the only thing the magnetometer is needed for is the
+	// third. So fuse exactly that: one scalar, the heading discrepancy, with a
+	// Jacobian that can only rotate the estimate about the EARTH VERTICAL. Roll
+	// and pitch are then structurally untouchable by the magnetometer, whatever
+	// it reads. This is what ArduPilot's fuseEulerYaw() does; the 3-axis
+	// alternative is only sound alongside the 6 earth/body field states EKF3
+	// carries to make the reference observable, which is out of scope here.
+	const float mag_norm = vectorNorm(mag);
+	if (mag_norm < 1.0e-9f)
+	{
+		return false; // no field, no heading
+	}
+
 	float R[3][3];
 	quaternionToRotationMatrix(q, R);
 
-	Vector3f v{
-		R[0][0] * mag_ref_.x + R[1][0] * mag_ref_.y + R[2][0] * mag_ref_.z,
-		R[0][1] * mag_ref_.x + R[1][1] * mag_ref_.y + R[2][1] * mag_ref_.z,
-		R[0][2] * mag_ref_.x + R[1][2] * mag_ref_.y + R[2][2] * mag_ref_.z
-	};
+	// Measured field rotated into NED through the CURRENT attitude estimate. If
+	// the estimate's yaw is wrong by eps, this lands rotated by eps about down
+	// from mag_ref_ -- which is precisely the quantity to null.
+	const Vector3f m_ned{
+		R[0][0] * mag.x + R[0][1] * mag.y + R[0][2] * mag.z,
+		R[1][0] * mag.x + R[1][1] * mag.y + R[1][2] * mag.z,
+		R[2][0] * mag.x + R[2][1] * mag.y + R[2][2] * mag.z};
 
-	Vector3f innov = vectorSub(mag, v);
-	float innovation[3] = {innov.x, innov.y, innov.z};
+	// Horizontal components only: the vertical one is inclination, which is what
+	// must not be allowed to influence the answer.
+	const float h_meas = std::sqrt(m_ned.x * m_ned.x + m_ned.y * m_ned.y);
+	const float h_ref  = std::sqrt(mag_ref_.x * mag_ref_.x + mag_ref_.y * mag_ref_.y);
 
-	float S_v[3][3];
-	skewSymmetric(v, S_v);
-
-	float H[3][ESEKF_STATE_DIM];
-	std::memset(H, 0, sizeof(H));
-	for (int i = 0; i < 3; ++i)
+	// Near-vertical field (magnetic poles, or a reference set with no horizontal
+	// component) carries no heading. Refusing keeps a meaningless angle out of
+	// the state; the aiding timeout then reports yaw as unaided, which is true.
+	const float kMinHorizField = 1.0e-4f; // fraction-of-Earth-field scale guard
+	if (h_meas < kMinHorizField * mag_norm || h_ref < 1.0e-9f)
 	{
-		for (int j = 0; j < 3; ++j)
-		{
-			H[i][j] = S_v[i][j];
-		}
+		return false;
+	}
+
+	// eps > 0 means the estimate's yaw is LARGER than the truth.
+	float eps = std::atan2(m_ned.y, m_ned.x) - std::atan2(mag_ref_.y, mag_ref_.x);
+	eps = wrapPiF(eps);
+
+	// Observation: drive eps to zero. z = 0, h(x) = eps, so innovation = -eps.
+	const float innovation = -eps;
+
+	// The attitude error state is a BODY-frame rotation vector (the nominal is
+	// updated by right multiplication, see injectErrorState()). A rotation about
+	// the earth vertical is therefore u = R^T * [0,0,1], the third ROW of R, and
+	// d(eps)/d(dtheta) = u^T. Because u is a unit vector this Jacobian has unit
+	// gain in the yaw direction and is exactly zero in every direction
+	// orthogonal to it -- the structural guarantee that roll and pitch cannot
+	// move, which no amount of tuning could give the 3-axis form.
+	const float h3[3] = {R[2][0], R[2][1], R[2][2]};
+
+	// Heading noise, in radians^2, derived from the caller's field-unit noise so
+	// setMagNoise() keeps meaning what it says. A field error of sigma across
+	// the horizontal component subtends sigma/|H_horizontal| radians of heading,
+	// so the angular variance is the field variance divided by H^2. This is why
+	// a weak horizontal field -- high latitude, or a badly sited sensor -- is
+	// automatically trusted less rather than needing a separate parameter.
+	const float mag_var = (R_mag[0][0] + R_mag[1][1] + R_mag[2][2]) * (1.0f / 3.0f);
+	float r_yaw = mag_var / (h_meas * h_meas);
+	if (!(r_yaw > kMinYawVariance))
+	{
+		r_yaw = kMinYawVariance; // never claim a perfect heading
 	}
 
 	// The magnetometer keeps the forced-fusion escape rather than a state reset.
-	// Its innovation is bounded by the field magnitude, so a mag lockout cannot
-	// produce the unbounded error that a position lockout can, and repeatedly
-	// fusing is enough to walk yaw back. (EKF3 does have a yaw reset, driven by
-	// its GSF yaw estimator, which is well beyond this filter's scope.)
+	// Its innovation is an angle and so is bounded by pi, meaning a mag lockout
+	// cannot produce the unbounded error that a position lockout can, and
+	// repeatedly fusing is enough to walk yaw back. (EKF3 does have a yaw reset,
+	// driven by its GSF yaw estimator, which is well beyond this filter's scope.)
 	const bool force = gateRecoveryDue(last_mag_fuse_t_, last_mag_reject_t_);
-	const bool fused = kalmanUpdate(innovation, H, R_mag, force);
+	const bool fused = kalmanUpdateScalarVec3(innovation, 0, h3, r_yaw, force);
 
 	mag_test_ratio_ = last_test_ratio_;
 	if (fused)

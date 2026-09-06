@@ -39,6 +39,23 @@ enum class Calibrator_StatusTypeDef{
 // control loop, so reporting every sample would swamp the serial link.
 #define CALIBRATOR_PROGRESS_INTERVAL          50
 
+// ONE sample buffer, shared by the accelerometer tumble and the compass sweep.
+//
+// Both procedures collect into a caller-supplied buffer (see
+// AccelerometerCalibrator::beginTumble and CompassCalibrator::begin) and both
+// want 300 Vector3f, about 3.6 kB each. Giving each its own array put 7.2 kB
+// permanently in .bss to serve two procedures that run for a few seconds on the
+// ground, never in flight, and NEVER AT THE SAME TIME -- beginProcedure()
+// refuses to start one while another is running, which is what makes sharing
+// provably safe rather than merely probable.
+//
+// If you port this to a part where even 3.6 kB is too much: the buffer is a
+// caller parameter precisely so it can live somewhere else, and the six-
+// position accelerometer procedure needs no buffer at all.
+#define CALIBRATOR_SAMPLE_ARENA \
+	((ACCEL_CAL_TUMBLE_MAX_SAMPLES > COMPASS_CAL_MAX_SAMPLES) \
+			? ACCEL_CAL_TUMBLE_MAX_SAMPLES : COMPASS_CAL_MAX_SAMPLES)
+
 // On-EEPROM correction record. Both sensors persist the same shape, because
 // every procedure this class runs reduces to one affine correction:
 //
@@ -187,10 +204,27 @@ public:
 	// Discard the stored calibration for both sensors, in RAM and on EEPROM.
 	Calibrator_StatusTypeDef clearStoredCalibration();
 
+	// Serialisation, exposed deliberately. These are pure functions with no I/O
+	// and no dependence on instance state, so the on-EEPROM format, its CRC and
+	// its rejection rules can be exercised directly -- which is the only way to
+	// check that a blank device, a half-written record or a NaN payload is
+	// refused, since none of those can be produced through the normal path.
+	// Also useful to a ground-station or config tool that needs to build or
+	// validate a record without an MCU.
+	static uint16_t recordCrc(const CalibrationRecord &rec);
+	static void packRecord(const Vector3f &offset, const Mat3f &matrix,
+			CalibrationRecord &out);
+	static bool unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
+			Mat3f &matrix);
+
 private:
 	AccelerometerCalibrator _accelerometerCalibrator;
 	CompassCalibrator _compassCalibrator;
 	LevelCalibrator _levelCalibrator;
+
+	// The one sample buffer, lent to whichever procedure is running. See
+	// CALIBRATOR_SAMPLE_ARENA for why sharing is safe.
+	Vector3f _sampleArena[CALIBRATOR_SAMPLE_ARENA];
 
 	EEPROM *_storage;
 
@@ -261,13 +295,7 @@ private:
 	Calibrator_StatusTypeDef saveCompassCalibrationData();
 	Calibrator_StatusTypeDef saveLevelCalibrationData();
 
-	// Serialisation helpers. Kept static and free of any I/O so the format,
-	// the CRC and the rejection rules are directly testable.
-	static uint16_t recordCrc(const CalibrationRecord &rec);
-	static void packRecord(const Vector3f &offset, const Mat3f &matrix,
-			CalibrationRecord &out);
-	static bool unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-			Mat3f &matrix);
+
 
 	Calibrator_StatusTypeDef loadRecord(EEPROMLocation location,
 			Vector3f &offset, Mat3f &matrix);

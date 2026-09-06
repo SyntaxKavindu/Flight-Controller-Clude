@@ -11,6 +11,8 @@ CompassCalibrator::CompassCalibrator() {
 }
 
 void CompassCalibrator::reset() {
+    _samples = nullptr;
+    _capacity = 0;
     _sample_count = 0;
     _sum = Vector3f();
     _accepted_total = 0;
@@ -19,14 +21,26 @@ void CompassCalibrator::reset() {
     _samples_since_progress = 0;
     _filled_bins = 0;
     memset(_bin_count, 0, sizeof(_bin_count));
+    _scatter_ratio = 0.0f;
     _nominal_radius = 500.0f;
     _status = CalStatus::IDLE;
     _offset = Vector3f();
     _softiron = Mat3f::identity();
 }
 
-void CompassCalibrator::begin(float nominal_field_magnitude) {
+bool CompassCalibrator::begin(float nominal_field_magnitude,
+                              Vector3f *sample_buffer, uint16_t capacity) {
     reset();
+
+    // Too small to ever reach COMPASS_CAL_MIN_SAMPLES: refuse up front rather
+    // than collect for ever and fail the fit. Note rebin() can DROP samples, so
+    // a capacity merely equal to the minimum is legitimate -- coverage, not the
+    // buffer, is what finishes the run.
+    if (sample_buffer == nullptr || capacity < COMPASS_CAL_MIN_SAMPLES) {
+        return false;
+    }
+    _samples  = sample_buffer;
+    _capacity = capacity;
     // The nominal magnitude is both the normalisation used by the fit and the
     // output scale of correct(). It must be strictly positive; anything else
     // would make the fit divide by ~zero, so fall back to the default rather
@@ -35,6 +49,7 @@ void CompassCalibrator::begin(float nominal_field_magnitude) {
         _nominal_radius = nominal_field_magnitude;
     }
     _status = CalStatus::COLLECTING;
+    return true;
 }
 
 Vector3f CompassCalibrator::centroid() const {
@@ -78,6 +93,59 @@ void CompassCalibrator::rebin() {
     _sample_count = keep;
 }
 
+// Smallest/largest eigenvalue of the sample scatter (second-moment) matrix
+// taken about the centroid.
+//
+// This is the check that finally separates "the airframe was turned all the way
+// over" from "the airframe was waved around upright", and it works for one
+// reason: a scatter matrix is invariant to TRANSLATION. Hard iron is a
+// translation, so it cannot influence this number at all -- which is precisely
+// what defeated every direction-based coverage test tried before it. A sweep
+// covering the whole sphere is isotropic and returns ~1; one covering a
+// hemisphere is squashed along the cap axis and returns ~0.25 (analytically
+// r^2/12 over r^2/3); a narrow cap tends to 0.
+//
+// Soft iron does affect it -- it scales the cloud along the ellipsoid axes --
+// but only by the square of the axis ratio, which for a realistic +/-15% part
+// still leaves ~0.7, far above the threshold.
+//
+// Cost: one pass over the samples plus one 3x3 symmetric eigen-decomposition,
+// paid once at the end of a calibration that has already run for seconds.
+float CompassCalibrator::scatterAnisotropy() const {
+    if (_samples == nullptr || _sample_count < 4) return 0.0f;
+
+    const Vector3f c = centroid();
+
+    Mat3f M = Mat3f();
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) M.m[i][j] = 0.0f;
+    }
+    for (uint16_t k = 0; k < _sample_count; k++) {
+        const Vector3f d = _samples[k] - c;
+        const float v[3] = { d.x, d.y, d.z };
+        for (int i = 0; i < 3; i++) {
+            for (int j = 0; j < 3; j++) M.m[i][j] += v[i] * v[j];
+        }
+    }
+    const float inv_n = 1.0f / (float)_sample_count;
+    for (int i = 0; i < 3; i++) {
+        for (int j = 0; j < 3; j++) M.m[i][j] *= inv_n;
+    }
+
+    float eig[3];
+    Mat3f vec;
+    eigenSymmetric3x3(M, eig, vec);
+
+    float mn = eig[0], mx = eig[0];
+    for (int i = 1; i < 3; i++) {
+        if (eig[i] < mn) mn = eig[i];
+        if (eig[i] > mx) mx = eig[i];
+    }
+    if (!(mx > 0.0f)) return 0.0f;
+    if (mn < 0.0f) mn = 0.0f;   // round-off on a near-degenerate cloud
+    return mn / mx;
+}
+
 // O(1) Spherical Bin Index mapping. The argument is a direction from the
 // centre of the cloud, not a raw reading -- see rebin().
 uint8_t CompassCalibrator::getBinIndex(const Vector3f &s) {
@@ -102,7 +170,7 @@ SampleResult CompassCalibrator::addSample(float x, float y, float z) {
     // taken addSample() flips the status to READY_TO_FIT, so testing the mode
     // first would report every later sample as REJECTED_NOT_COLLECTING and the
     // caller could never tell "buffer full" from "never started".
-    if (_sample_count >= COMPASS_CAL_MAX_SAMPLES) {
+    if (_samples == nullptr || _sample_count >= _capacity) {
         if (_status == CalStatus::COLLECTING) _status = CalStatus::READY_TO_FIT;
         return SampleResult::REJECTED_BUFFER_FULL;
     }
@@ -128,9 +196,12 @@ SampleResult CompassCalibrator::addSample(float x, float y, float z) {
     // the samples that exist. Re-running the coverage test against the fitted
     // centre was tried and does not separate the cases -- a good full-sphere
     // sweep leaves 35 bins occupied there and a 70%-of-sphere sweep leaves 36.
-    // Until there is a real check, the defence is procedural: tell the
-    // operator to invert the airframe, and treat a $PROG that stalls short of
-    // 100% as a sweep that is not finished.
+    //
+    // RESOLVED at fit time instead, by scatterAnisotropy(): the SHAPE of the
+    // cloud gives the sweep away where its bin count does not. See the note
+    // there. This binning stays exactly as it is -- it is what makes coverage
+    // reachable at all under heavy hard iron -- and the one-sided case is now
+    // caught in calibrate() rather than left to operator discipline.
     uint8_t bin = getBinIndex(s - centroid());
 
     // Reject if bin has reached maximum point density cap
@@ -162,7 +233,13 @@ SampleResult CompassCalibrator::addSample(float x, float y, float z) {
         rebin();
     }
 
-    if (_sample_count >= COMPASS_CAL_MAX_SAMPLES) {
+    // Recomputed here -- once per ACCEPTED sample, after any rebin -- rather
+    // than inside getProgressPercent()/isReadyToCalibrate(), which the control
+    // loop calls on every sample whether it was accepted or not. Accepted
+    // samples are capped by the buffer, so this is bounded work.
+    _scatter_ratio = scatterAnisotropy();
+
+    if (_sample_count >= _capacity) {
         _status = CalStatus::READY_TO_FIT;
     }
 
@@ -189,12 +266,35 @@ float CompassCalibrator::getProgressPercent() const {
     float bin_frac = (float)_filled_bins / (float)COMPASS_CAL_MIN_BINS;
     if (bin_frac > 1.0f) bin_frac = 1.0f;
 
+    // The WORST of the three requirements, not their average: all three must be
+    // met, so the smallest is the honest answer to "how far along is this?".
+    // The scatter term is what makes the figure stall for an operator who keeps
+    // waving the airframe about upright, and a stalled figure is exactly what
+    // isStalled() reports.
+    float scatter_frac = _scatter_ratio / COMPASS_CAL_MIN_SCATTER_RATIO;
+    if (scatter_frac > 1.0f) scatter_frac = 1.0f;
+
     float combined = sample_frac < bin_frac ? sample_frac : bin_frac;
+    if (scatter_frac < combined) combined = scatter_frac;
     return combined * 100.0f;
 }
 
+// The scatter requirement is part of READINESS, not just a check at fit time.
+//
+// Failing it only in calibrate() would be correct but hostile: the operator is
+// told "ready", the fit is then rejected, and the whole sweep has to start again
+// with no indication of what was wrong. Requiring it here means collection
+// simply continues until the airframe has actually been turned over -- and the
+// existing stall machinery already carries the right advice for a sweep that
+// never gets there ("KEEP TURNING THE AIRFRAME - ALL SIDES, INCLUDING
+// INVERTED").
+//
+// calibrate() re-checks it regardless: this class does not assume its caller
+// consulted isReadyToCalibrate() first.
 bool CompassCalibrator::isReadyToCalibrate() const {
-    return (_sample_count >= COMPASS_CAL_MIN_SAMPLES) && (_filled_bins >= COMPASS_CAL_MIN_BINS);
+    return (_sample_count >= COMPASS_CAL_MIN_SAMPLES)
+        && (_filled_bins >= COMPASS_CAL_MIN_BINS)
+        && (_scatter_ratio >= COMPASS_CAL_MIN_SCATTER_RATIO);
 }
 
 bool CompassCalibrator::solve9x9(float A[9][9], float b[9], float x[9]) {
@@ -360,6 +460,18 @@ CalStatus CompassCalibrator::calibrate() {
         return _status;
     }
     if (_filled_bins < COMPASS_CAL_MIN_BINS) {
+        _status = CalStatus::FAILED_POOR_COVERAGE;
+        return _status;
+    }
+
+    // Second, independent coverage test -- see scatterAnisotropy(). The bin
+    // count above is measured from the centroid, which a one-sided sweep moves
+    // into the middle of its own cap, so that test alone can be satisfied by an
+    // airframe that was never turned over. This one looks at the shape of the
+    // cloud, which no amount of hard iron can disguise.
+    if (scatterAnisotropy() < COMPASS_CAL_MIN_SCATTER_RATIO) {
+        // Recomputed rather than read from _scatter_ratio: calibrate() is public
+        // and must not depend on addSample() having run since the last change.
         _status = CalStatus::FAILED_POOR_COVERAGE;
         return _status;
     }

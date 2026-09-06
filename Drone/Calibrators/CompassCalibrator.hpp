@@ -7,8 +7,12 @@
 #ifndef CALIBRATORS_COMPASSCALIBRATOR_HPP_
 #define CALIBRATORS_COMPASSCALIBRATOR_HPP_
 
-#include "common.hpp"
+// Maths types only -- deliberately NOT common.hpp, which drags in the STM32
+// HAL. This class is pure algorithm and must stay portable; see MathTypes.hpp.
+#include "MathTypes.hpp"
 
+// Recommended sample-buffer capacity -- the caller now supplies the storage, so
+// this sizes it rather than declaring an array. See begin().
 #define COMPASS_CAL_MAX_SAMPLES    300
 #define COMPASS_CAL_MIN_SAMPLES    150
 #define COMPASS_CAL_NUM_BINS       64
@@ -35,6 +39,22 @@
 // that a fit may leave behind and still be accepted. Generous on purpose --
 // it is here to reject nonsense, not to grade a good calibration.
 #define COMPASS_CAL_MAX_FIT_RESIDUAL 0.15f
+
+// Smallest scatter-matrix eigenvalue ratio a sweep may have and still be
+// accepted -- the test for "did the operator actually turn the airframe over?".
+//
+// Measured on synthetic sweeps: a full sphere gives 1.00, a full sphere with
+// heavy hard AND soft iron 0.70, a full sphere with very uneven dwell 0.81,
+// two thirds of a sphere 0.65 -- against 0.38 for a hemisphere plus a little,
+// 0.25 for an exact hemisphere (the analytic value: variance r^2/12 across the
+// cap axis versus r^2/3 along it) and 0.22 for a hemisphere with iron. 0.5 sits
+// in the gap with room on both sides.
+//
+// Raising this rejects lazier sweeps; lowering it toward 0.25 lets a
+// never-inverted sweep through again. Do not go below ~0.3: that is the region
+// where a fit is exact on the samples collected and materially wrong on the
+// orientations that were not.
+#define COMPASS_CAL_MIN_SCATTER_RATIO 0.5f
 
 // Collection makes no progress at all if the airframe stops being moved, and
 // nothing in the procedure notices: isReadyToCalibrate() simply never becomes
@@ -80,7 +100,14 @@ class CompassCalibrator {
 public:
     CompassCalibrator();
 
-    void begin(float nominal_field_magnitude = 500.0f);
+    // sample_buffer / capacity: where the samples are collected. Caller-owned,
+    // must outlive the procedure. See AccelerometerCalibrator::beginTumble()
+    // for why this is a parameter and not a member array.
+    //
+    // Returns false -- and does NOT start -- if the buffer is null or smaller
+    // than COMPASS_CAL_MIN_SAMPLES, which could never complete.
+    bool begin(float nominal_field_magnitude, Vector3f *sample_buffer,
+               uint16_t capacity);
     SampleResult addSample(float x, float y, float z);
     SampleResult addSample(const Vector3f &s) { return addSample(s.x, s.y, s.z); }
 
@@ -106,7 +133,9 @@ public:
     void reset();
 
 private:
-    Vector3f _samples[COMPASS_CAL_MAX_SAMPLES];
+    // Caller-owned; see begin(). Null whenever no procedure is running.
+    Vector3f *_samples;
+    uint16_t _capacity;
     uint16_t _sample_count;
 
     // Running sum and count of every sample ever accepted, used only to derive
@@ -130,6 +159,11 @@ private:
     uint8_t _bin_count[COMPASS_CAL_NUM_BINS];
     uint8_t _filled_bins;
 
+    // Cached scatterAnisotropy(), refreshed once per accepted sample. Readiness
+    // and progress both read it, and both are queried far more often than the
+    // cloud actually changes.
+    float _scatter_ratio;
+
     float _nominal_radius;
     CalStatus _status;
 
@@ -149,6 +183,12 @@ private:
     // Recompute the whole bin table about the current centroid, dropping the
     // samples the new binning makes redundant.
     void rebin();
+
+    // Smallest/largest eigenvalue of the sample scatter matrix about the
+    // centroid: 1 for a cloud spread evenly over a sphere, 0.25 for one
+    // covering a hemisphere, ->0 for a narrow cap. See the note at the
+    // definition for why this is the check that works.
+    float scatterAnisotropy() const;
 
     static uint8_t getBinIndex(const Vector3f &s);
 

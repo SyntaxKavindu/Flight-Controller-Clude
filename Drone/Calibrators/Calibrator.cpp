@@ -121,10 +121,16 @@ void Calibrator::startAccelerometerTumbleCalibration() {
 	if (!beginProcedure("ACCL")) {
 		return;
 	}
+	if (!_accelerometerCalibrator.beginTumble(ACCEL_CAL_STANDARD_GRAVITY,
+			CALIBRATOR_ACCEL_STILLNESS_THRESHOLD, _sampleArena,
+			CALIBRATOR_SAMPLE_ARENA)) {
+		// Only reachable if the arena is mis-sized at compile time, but a
+		// procedure that silently never finishes is the worst way to find out.
+		telemetry.send("$CAL,ACCL,FAIL,NOBUFFER");
+		return;
+	}
 	_isAccelCalibrating = true;
 	_isAccelCalibrated = false;
-	_accelerometerCalibrator.beginTumble(ACCEL_CAL_STANDARD_GRAVITY,
-			CALIBRATOR_ACCEL_STILLNESS_THRESHOLD);
 
 	telemetry.send("$INFO,ACCEL TUMBLE CALIBRATION STARTED");
 	telemetry.send("$INFO,ROTATE SLOWLY THROUGH MANY ORIENTATIONS, PAUSING IN EACH");
@@ -134,9 +140,13 @@ void Calibrator::startCompassCalibration() {
 	if (!beginProcedure("MAG")) {
 		return;
 	}
+	if (!_compassCalibrator.begin(CALIBRATOR_COMPASS_NOMINAL_GAUSS, _sampleArena,
+			CALIBRATOR_SAMPLE_ARENA)) {
+		telemetry.send("$CAL,MAG,FAIL,NOBUFFER");
+		return;
+	}
 	_isCompassCalibrating = true;
 	_isCompassCalibrated = false;
-	_compassCalibrator.begin(CALIBRATOR_COMPASS_NOMINAL_GAUSS);
 
 	telemetry.send("$INFO,MAG CALIBRATION STARTED");
 	telemetry.send("$INFO,TUMBLE THE AIRFRAME THROUGH AS MANY ORIENTATIONS AS POSSIBLE");

@@ -8,7 +8,9 @@
 #ifndef ESEKF_ESEKF_HPP_
 #define ESEKF_ESEKF_HPP_
 
-#include "common.hpp"
+// Maths types only -- deliberately NOT common.hpp, which drags in the STM32
+// HAL. This class is pure algorithm and must stay portable; see MathTypes.hpp.
+#include "MathTypes.hpp"
 
 // ---------------------------------------------------------------------------
 // BUILD AND USAGE CONTRACT -- read before integrating.
@@ -189,8 +191,24 @@ public:
 	// non-finite input, blocked by the motion gate, or blocked by the innovation
 	// consistency gate -- and true if it was actually fused.
 	bool updateAccelerometer(const Vector3f &accel);
-	bool updateMagnetometer(const Vector3f &mag);
 	bool updateBarometer(float altitude);
+
+	// Magnetometer. Takes the calibrated field as a body-frame 3-vector in
+	// whatever unit the sensor reports, and fuses HEADING ONLY: one scalar,
+	// with a Jacobian along the earth vertical. Roll and pitch are structurally
+	// immune to it -- a magnetic disturbance can rotate the estimate about the
+	// vertical and do nothing else, whatever the sensor reads.
+	//
+	// That is not a simplification, it is the correct model for this filter.
+	// Gravity already fixes two of the three attitude axes; the magnetometer is
+	// only needed for the third. Fusing the field as a 3-vector against a
+	// reference fixed at alignment -- with no earth-field states to absorb the
+	// difference -- feeds every local anomaly into roll and pitch as well. See
+	// the note in updateMagnetometer().
+	//
+	// Returns false, and leaves yaw unaided, when the field is too weak or too
+	// close to vertical to carry a heading.
+	bool updateMagnetometer(const Vector3f &mag);
 
 	// gps = {latitude, longitude, altitude}. UNITS: lat/lon in RADIANS, altitude
 	// in metres. Most GPS drivers (NMEA, u-blox UBX-NAV-PVT) emit DEGREES --
@@ -306,6 +324,14 @@ public:
 
 	// ---- Measurement noise getters / setters ----
 	void setAccelNoise(const float R[3][3]);
+
+	// Magnetometer noise, as a covariance in the sensor's own field units --
+	// the same units updateMagnetometer() is fed. Only the diagonal average is
+	// used: the fusion is scalar (heading), so the field-unit variance is
+	// converted to a heading variance by dividing by the squared horizontal
+	// field strength, which is the correct conversion and also makes a weak
+	// horizontal field automatically trusted less. Keeping the setter in field
+	// units means a caller tunes against a number the datasheet quotes.
 	void setMagNoise(const float R[3][3]);
 	void setBaroNoise(float variance);
 	void setGPSNoise(const float R[3][3]);
@@ -567,6 +593,15 @@ private:
 	                   bool force_fuse = false);
 	bool kalmanUpdateScalar(float innovation, int state_index, float h, float r,
 	                         bool force_fuse = false);
+
+	// Scalar update whose Jacobian is non-zero on exactly one 3-state block,
+	// H = [0.. h3 ..0] starting at `first_state`. The magnetometer's heading
+	// measurement is this shape: one number, observing a direction in the
+	// attitude block. kalmanUpdateScalar() cannot express it (its H has a single
+	// non-zero ELEMENT) and the 3-vector kalmanUpdate() would need a 3x3 inverse
+	// to fuse one scalar. Joseph form, O(N^2), 60 bytes of scratch.
+	bool kalmanUpdateScalarVec3(float innovation, int first_state, const float h3[3],
+	                             float r, bool force_fuse = false);
 
 	// True if `last_reject_t` shows this source has been continuously gated out
 	// for longer than ESEKF_GATE_RECOVERY_TIMEOUT, meaning the next sample must
