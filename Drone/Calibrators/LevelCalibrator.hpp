@@ -120,7 +120,7 @@ public:
 
     // Rotation from measured board axes to true airframe axes. Apply to every
     // sensor on the board, not just the accelerometer.
-    Mat3f getRotation() const { return _rotation; }
+    Matrix3f getRotation() const { return _rotation; }
     // Mounting error the fit found, in degrees; -1 until it has succeeded.
     float getTiltDeg() const;
     Vector3f correct(const Vector3f &v) const;
@@ -130,9 +130,9 @@ public:
     // introduces no rotation about `to` itself, which is what keeps this from
     // inventing a yaw correction it has no evidence for. False if the two are
     // antiparallel, where no smallest rotation exists.
-    static bool rotationBetween(const Vector3f &from, const Vector3f &to, Mat3f &out);
+    static bool rotationBetween(const Vector3f &from, const Vector3f &to, Matrix3f &out);
     // Right-handed rotation about +Z, used to fold in the yaw offset.
-    static Mat3f yawRotation(float radians);
+    static Matrix3f yawRotation(float radians);
 
 private:
     LevelCalStatus _status;
@@ -148,7 +148,7 @@ private:
     uint16_t _best_count;
     uint32_t _samples_since_progress;
 
-    Mat3f _rotation;
+    Matrix3f _rotation;
     float _tilt_deg;
 };
 

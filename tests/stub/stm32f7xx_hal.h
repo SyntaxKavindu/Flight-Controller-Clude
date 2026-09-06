@@ -14,7 +14,25 @@ typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
 
 typedef struct { int dummy; } GPIO_TypeDef;
 typedef struct { int dummy; } DMA_HandleTypeDef;
-typedef struct { uint32_t ErrorCode; DMA_HandleTypeDef *hdmarx; } UART_HandleTypeDef;
+
+/* Mirrors the fields the drivers in this tree actually read. RxState and the
+ * HAL_UART_STATE_* values are used by IBUS and NEOM8N to tell a stalled DMA
+ * receive from a healthy one; without them those two look broken here while
+ * being perfectly fine on target. */
+typedef uint32_t HAL_UART_StateTypeDef;
+#define HAL_UART_STATE_RESET     0x00000000u
+#define HAL_UART_STATE_READY     0x00000020u
+#define HAL_UART_STATE_BUSY      0x00000024u
+#define HAL_UART_STATE_BUSY_RX   0x00000022u
+#define HAL_UART_STATE_TIMEOUT   0x000000A0u
+#define HAL_UART_STATE_ERROR     0x000000E0u
+
+typedef struct {
+    uint32_t ErrorCode;
+    DMA_HandleTypeDef *hdmarx;
+    __extension__ volatile HAL_UART_StateTypeDef RxState;
+    __extension__ volatile HAL_UART_StateTypeDef gState;
+} UART_HandleTypeDef;
 typedef struct { int dummy; } SPI_HandleTypeDef;
 typedef struct { int dummy; } I2C_HandleTypeDef;
 typedef struct { uint32_t Instance; uint32_t Init; } TIM_HandleTypeDef;

@@ -9,8 +9,8 @@
 #define GPS_GPS_HPP_
 
 #include "NEOM8N.hpp"
-#include "Vector3f.hpp"
-#include "Matrix3f.hpp"
+// Vector3f, Matrix3f and Quaternionf together, with no HAL behind them.
+#include "MathTypes.hpp"
 
 // A GPS fix is a position on Earth, and these are the bounds of that. Anything
 // outside is a parse that went wrong or a module talking rubbish.

@@ -26,9 +26,9 @@ Calibrator::Calibrator() :
 				_isCompassCalibrated { false }, _isLevelCalibrated { false },
 				_lastSaveFailed { false }, _awaitingPosition { false },
 				_progressThrottle { 0 }, _calibrationEpoch { 0 },
-				_accelOffset { }, _accelMatrix { Mat3f::identity() },
-				_compassOffset { }, _compassMatrix { Mat3f::identity() },
-				_boardRotation { Mat3f::identity() } {
+				_accelOffset { }, _accelMatrix { Matrix3f::identity() },
+				_compassOffset { }, _compassMatrix { Matrix3f::identity() },
+				_boardRotation { Matrix3f::identity() } {
 }
 
 void Calibrator::init(EEPROM *storage) {
@@ -43,10 +43,10 @@ void Calibrator::init(EEPROM *storage) {
 	_progressThrottle = 0;
 	_lastSaveFailed = false;
 	_accelOffset = Vector3f();
-	_accelMatrix = Mat3f::identity();
+	_accelMatrix = Matrix3f::identity();
 	_compassOffset = Vector3f();
-	_compassMatrix = Mat3f::identity();
-	_boardRotation = Mat3f::identity();
+	_compassMatrix = Matrix3f::identity();
+	_boardRotation = Matrix3f::identity();
 	_accelerometerCalibrator.reset();
 	_compassCalibrator.reset();
 	_levelCalibrator.reset();
@@ -413,7 +413,7 @@ void Calibrator::sendVector(const char *key, const Vector3f &v) {
 			(double) v.z);
 }
 
-void Calibrator::sendMatrix(const char *key, const Mat3f &m) {
+void Calibrator::sendMatrix(const char *key, const Matrix3f &m) {
 	for (int i = 0; i < 3; i++) {
 		telemetry.send("$%s,%d,%.5f,%.5f,%.5f", key, i, (double) m.m[i][0],
 				(double) m.m[i][1], (double) m.m[i][2]);
@@ -503,7 +503,7 @@ void Calibrator::adoptAccelResult() {
 	// calibrateSixPosition() has already rejected a near-zero scale, so this
 	// cannot divide by zero.
 	const Vector3f scale = _accelerometerCalibrator.getScale();
-	_accelMatrix = Mat3f::identity();
+	_accelMatrix = Matrix3f::identity();
 	_accelMatrix.m[0][0] = 1.0f / scale.x;
 	_accelMatrix.m[1][1] = 1.0f / scale.y;
 	_accelMatrix.m[2][2] = 1.0f / scale.z;
@@ -535,7 +535,7 @@ uint16_t Calibrator::recordCrc(const CalibrationRecord &rec) {
 	return crc;
 }
 
-void Calibrator::packRecord(const Vector3f &offset, const Mat3f &matrix,
+void Calibrator::packRecord(const Vector3f &offset, const Matrix3f &matrix,
 		CalibrationRecord &out) {
 	memset(&out, 0, sizeof(out)); // keeps reserved/pad deterministic for the CRC
 
@@ -558,7 +558,7 @@ void Calibrator::packRecord(const Vector3f &offset, const Mat3f &matrix,
 }
 
 bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-		Mat3f &matrix) {
+		Matrix3f &matrix) {
 	if (rec.magic != CALIBRATION_RECORD_MAGIC) {
 		return false;
 	}
@@ -588,7 +588,7 @@ bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
 }
 
 Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
-		Vector3f &offset, Mat3f &matrix) {
+		Vector3f &offset, Matrix3f &matrix) {
 	if (_storage == nullptr) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
@@ -604,7 +604,7 @@ Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
 }
 
 Calibrator_StatusTypeDef Calibrator::saveRecord(EEPROMLocation location,
-		const Vector3f &offset, const Mat3f &matrix) {
+		const Vector3f &offset, const Matrix3f &matrix) {
 	if (_storage == nullptr) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
@@ -666,10 +666,10 @@ Calibrator_StatusTypeDef Calibrator::clearStoredCalibration() {
 	_isCompassCalibrated = false;
 	_isLevelCalibrated = false;
 	_accelOffset = Vector3f();
-	_accelMatrix = Mat3f::identity();
+	_accelMatrix = Matrix3f::identity();
 	_compassOffset = Vector3f();
-	_compassMatrix = Mat3f::identity();
-	_boardRotation = Mat3f::identity();
+	_compassMatrix = Matrix3f::identity();
+	_boardRotation = Matrix3f::identity();
 	noteGainsChanged();
 
 	if (_storage == nullptr) {

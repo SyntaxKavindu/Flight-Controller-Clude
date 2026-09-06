@@ -130,13 +130,13 @@ int main()
         // half-written record, or a payload that is finite-looking garbage.
         CalibrationRecord rec;
         std::memset(&rec, 0xFF, sizeof(rec));       // erased EEPROM reads as 0xFF
-        Vector3f off; Mat3f m;
+        Vector3f off; Matrix3f m;
         check(!Calibrator::unpackRecord(rec, off, m), "a blank (0xFF) record is rejected");
         std::memset(&rec, 0x00, sizeof(rec));
         check(!Calibrator::unpackRecord(rec, off, m), "an all-zero record is rejected");
 
         Vector3f o(1.5f, -2.5f, 0.25f);
-        Mat3f mm = Mat3f::identity();
+        Matrix3f mm = Matrix3f::identity();
         mm.m[0][1] = 0.125f; mm.m[2][0] = -0.75f;
         Calibrator::packRecord(o, mm, rec);
         check(Calibrator::unpackRecord(rec, off, m), "a well-formed record round-trips");

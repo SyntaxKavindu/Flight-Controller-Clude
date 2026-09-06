@@ -41,7 +41,7 @@ void AccelerometerCalibrator::reset() {
     _window_head = 0;
     _stillness_threshold_sq = 0.2f * 0.2f;
     _offset_tumble = Vector3f();
-    _matrix_tumble = Mat3f::identity();
+    _matrix_tumble = Matrix3f::identity();
 }
 
 void AccelerometerCalibrator::beginSixPosition(float motion_threshold) {
@@ -338,7 +338,7 @@ bool AccelerometerCalibrator::solve9x9(float A[9][9], float b[9], float x[9]) {
     return true;
 }
 
-bool AccelerometerCalibrator::invert3x3(const Mat3f &in, Mat3f &out) {
+bool AccelerometerCalibrator::invert3x3(const Matrix3f &in, Matrix3f &out) {
     const float a=in.m[0][0], b=in.m[0][1], c=in.m[0][2];
     const float d=in.m[1][0], e=in.m[1][1], f=in.m[1][2];
     const float g=in.m[2][0], h=in.m[2][1], i=in.m[2][2];
@@ -352,7 +352,7 @@ bool AccelerometerCalibrator::invert3x3(const Mat3f &in, Mat3f &out) {
     return true;
 }
 
-static inline void jacobiRotateU(Mat3f &m, Mat3f &v, int p, int q) {
+static inline void jacobiRotateU(Matrix3f &m, Matrix3f &v, int p, int q) {
     if (fabsf(m.m[p][q]) < 1e-12f) return;
     float theta = (m.m[q][q] - m.m[p][p]) / (2.0f * m.m[p][q]);
     float t = (theta >= 0.0f) ? 1.0f/(theta+sqrtf(1.0f+theta*theta)) : -1.0f/(-theta+sqrtf(1.0f+theta*theta));
@@ -371,8 +371,8 @@ static inline void jacobiRotateU(Mat3f &m, Mat3f &v, int p, int q) {
     }
 }
 
-void AccelerometerCalibrator::eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f &eigvec) {
-    eigvec = Mat3f::identity();
+void AccelerometerCalibrator::eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec) {
+    eigvec = Matrix3f::identity();
 
     // Convergence measured against the size of the matrix. An absolute
     // threshold would either never be met or be met immediately, depending
@@ -392,7 +392,7 @@ void AccelerometerCalibrator::eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f 
 }
 
 float AccelerometerCalibrator::fitResidual(const Vector3f &offset,
-        const Mat3f &matrix) const {
+        const Matrix3f &matrix) const {
     if (_sample_count == 0) return 0.0f;
 
     const float R = _nominal_radius;
@@ -446,13 +446,13 @@ AccelCalStatus AccelerometerCalibrator::calibrateTumble() {
     float p[9];
     if (!solve9x9(ATA, ATb, p)) { _status = AccelCalStatus::FAILED_SINGULAR_MATRIX; return _status; }
 
-    Mat3f M;
+    Matrix3f M;
     M.m[0][0]=p[0]; M.m[0][1]=p[3]; M.m[0][2]=p[4];
     M.m[1][0]=p[3]; M.m[1][1]=p[1]; M.m[1][2]=p[5];
     M.m[2][0]=p[4]; M.m[2][1]=p[5]; M.m[2][2]=p[2];
     Vector3f n(p[6], p[7], p[8]);
 
-    Mat3f Minv;
+    Matrix3f Minv;
     if (!invert3x3(M, Minv)) { _status = AccelCalStatus::FAILED_SINGULAR_MATRIX; return _status; }
     Vector3f V = Minv.mul(n) * -1.0f;
 
@@ -463,9 +463,9 @@ AccelCalStatus AccelerometerCalibrator::calibrateTumble() {
     // rather than applying 1/sqrt(K) afterwards handles either sign.
     float K = 1.0f - (n.x*V.x + n.y*V.y + n.z*V.z);
     if (fabsf(K) < 1e-6f) { _status = AccelCalStatus::FAILED_DEGENERATE_ELLIPSOID; return _status; }
-    Mat3f MK = M.scaled(1.0f / K);
+    Matrix3f MK = M.scaled(1.0f / K);
 
-    float eigval[3]; Mat3f eigvec;
+    float eigval[3]; Matrix3f eigvec;
     eigenSymmetric3x3(MK, eigval, eigvec);
 
     // Reject anything that is not a genuine ellipsoid: a non-positive
@@ -482,10 +482,10 @@ AccelCalStatus AccelerometerCalibrator::calibrateTumble() {
 
     // Every element written explicitly. Only the diagonal carries a value, and
     // the square root below is wrong unless the rest are zero, so this must
-    // not depend on how common.hpp happens to default-construct a Mat3f --
-    // `Mat3f D{}` zeroes an aggregate but calls a user-provided default
+    // not depend on how common.hpp happens to default-construct a Matrix3f --
+    // `Matrix3f D{}` zeroes an aggregate but calls a user-provided default
     // constructor, which may leave the members uninitialised.
-    Mat3f D = Mat3f();
+    Matrix3f D = Matrix3f();
     D.m[0][0] = 0.0f; D.m[0][1] = 0.0f; D.m[0][2] = 0.0f;
     D.m[1][0] = 0.0f; D.m[1][1] = 0.0f; D.m[1][2] = 0.0f;
     D.m[2][0] = 0.0f; D.m[2][1] = 0.0f; D.m[2][2] = 0.0f;
@@ -494,7 +494,7 @@ AccelCalStatus AccelerometerCalibrator::calibrateTumble() {
     // Symmetric (rotation-free) square root of M/K: it maps the ellipsoid onto
     // a sphere without also rotating the sensor frame, which is what keeps the
     // corrected axes aligned with the physical ones.
-    const Mat3f matrix = eigvec.mul(D).mul(eigvec.transposed());
+    const Matrix3f matrix = eigvec.mul(D).mul(eigvec.transposed());
     const Vector3f offset = V * R + C;
 
     // Last gate, and the only one that looks at how well the answer fits the
@@ -602,4 +602,4 @@ Vector3f AccelerometerCalibrator::getBias() const {
 }
 
 Vector3f AccelerometerCalibrator::getScale() const { return _scale_sixpos; }
-Mat3f AccelerometerCalibrator::getMatrix() const { return _matrix_tumble; }
+Matrix3f AccelerometerCalibrator::getMatrix() const { return _matrix_tumble; }

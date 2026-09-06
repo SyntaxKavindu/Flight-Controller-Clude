@@ -15,11 +15,10 @@ CXXFLAGS ?= -std=c++17 -O1 -g -Wall -Wextra -Wno-unused-parameter
 ROOT     := ..
 BUILD    := build
 
-INC := -I. -I$(ROOT)/Drone/Common -I$(ROOT)/Drone/Ahrs -I$(ROOT)/Drone/Calibrators \
-       -I$(ROOT)/Drone/Imu -I$(ROOT)/Drone/Magnetometer -I$(ROOT)/Drone/Barometer \
-       -I$(ROOT)/Drone/Telemetry -I$(ROOT)/Drone/Eeprom -I$(ROOT)/Drone \
-       -I$(ROOT)/Drone/Drivers/ICM42688P -I$(ROOT)/Drone/Drivers/LIS3MDL \
-       -I$(ROOT)/Drone/Drivers/BMP390 -I$(ROOT)/Drone/Drivers/M24C02 -Istub
+# Discovered, not hand-listed: the project puts every header on the include path
+# by directory, and a hand-maintained copy of that list here silently stops
+# covering whatever is added next.
+INC := -I. -Istub $(addprefix -I,$(shell find $(ROOT)/Drone -type d))
 
 ESEKF_SRC := $(ROOT)/Drone/Ahrs/ESEKF.cpp
 # The three engines, with NO facade and NO HAL: if this link needs anything from
@@ -38,8 +37,14 @@ STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
              $(ROOT)/Drone/Drivers/M24C02/M24C02.cpp \
              stub/stub.cpp
 
-.PHONY: all esekf cal integ firmware clean
-all: esekf cal integ firmware
+# Every .cpp under Drone/, including files nothing links yet. GPS.cpp sat broken
+# for a long time -- it included a "Matrix3f.hpp" that does not exist -- purely
+# because no build ever touched it. A syntax-only sweep costs seconds and is the
+# only thing that catches that class of rot.
+ALL_SRC := $(shell find $(ROOT)/Drone -name '*.cpp')
+
+.PHONY: all esekf cal integ firmware compileall clean
+all: compileall esekf cal integ firmware
 	@echo "=========================================="
 	@echo " all suites passed"
 	@echo "=========================================="
@@ -65,6 +70,12 @@ firmware: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/firmware firmware_link.cpp \
 		$(ROOT)/Drone/Drone.cpp $(STACK_SRC)
 	@$(BUILD)/firmware && echo "firmware: links and runs"
+
+compileall:
+	@for f in $(ALL_SRC); do \
+		$(CXX) $(CXXFLAGS) $(INC) -fsyntax-only $$f || exit 1; \
+	done
+	@echo "compileall: $(words $(ALL_SRC)) source files compile"
 
 clean:
 	@rm -rf $(BUILD)

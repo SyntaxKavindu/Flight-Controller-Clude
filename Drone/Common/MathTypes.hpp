@@ -32,6 +32,6 @@
 
 #include "Vector3f.hpp"
 #include "Quaternionf.hpp"
-#include "Mat3f.hpp"
+#include "Matrix3f.hpp"
 
 #endif /* COMMON_MATHTYPES_HPP_ */

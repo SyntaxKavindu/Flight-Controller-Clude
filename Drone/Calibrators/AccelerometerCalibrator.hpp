@@ -199,7 +199,7 @@ public:
     // Needed to fold the tumble matrix into a single correction matrix.
     float getNominalRadius() const { return _nominal_radius; }
     Vector3f getScale() const;
-    Mat3f getMatrix() const;
+    Matrix3f getMatrix() const;
 
 private:
     AccelCalMode _mode;
@@ -243,7 +243,7 @@ private:
     uint8_t _window_head;
     float _stillness_threshold_sq;
     Vector3f _offset_tumble;
-    Mat3f _matrix_tumble;
+    Matrix3f _matrix_tumble;
 
     AccelSampleResult addSampleTumble(const Vector3f &s);
     AccelCalStatus calibrateTumble();
@@ -254,12 +254,12 @@ private:
     Vector3f centroid() const;
     // RMS deviation of the corrected tumble samples from 1 g, relative to it.
     // Computed against the candidate gains, before they are committed.
-    float fitResidual(const Vector3f &offset, const Mat3f &matrix) const;
+    float fitResidual(const Vector3f &offset, const Matrix3f &matrix) const;
     static uint8_t getBinIndex(const Vector3f &s);
 
     static bool solve9x9(float A[9][9], float b[9], float x[9]);
-    static bool invert3x3(const Mat3f &in, Mat3f &out);
-    static void eigenSymmetric3x3(Mat3f m, float eigval[3], Mat3f &eigvec);
+    static bool invert3x3(const Matrix3f &in, Matrix3f &out);
+    static void eigenSymmetric3x3(Matrix3f m, float eigval[3], Matrix3f &eigvec);
 };
 
 #endif /* CALIBRATORS_ACCELEROMETERCALIBRATOR_HPP_ */

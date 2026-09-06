@@ -25,7 +25,7 @@ void LevelCalibrator::reset() {
     _best_count = 0;
     _samples_since_progress = 0;
 
-    _rotation = Mat3f::identity();
+    _rotation = Matrix3f::identity();
     _tilt_deg = -1.0f;
 }
 
@@ -110,7 +110,7 @@ float LevelCalibrator::getTiltDeg() const {
 }
 
 bool LevelCalibrator::rotationBetween(const Vector3f &from, const Vector3f &to,
-        Mat3f &out) {
+        Matrix3f &out) {
     // Rodrigues, built from the cross and dot products directly. With v the
     // cross product, s = |v| and c the dot product:
     //     R = I + [v]x + [v]x^2 * (1-c)/s^2
@@ -126,7 +126,7 @@ bool LevelCalibrator::rotationBetween(const Vector3f &from, const Vector3f &to,
     // rather than choose arbitrarily -- in this application it means the board
     // is mounted upside down, which is not something to paper over.
     if (c <= -1.0f + 1e-6f) {
-        out = Mat3f::identity();
+        out = Matrix3f::identity();
         return false;
     }
 
@@ -146,10 +146,10 @@ bool LevelCalibrator::rotationBetween(const Vector3f &from, const Vector3f &to,
     return true;
 }
 
-Mat3f LevelCalibrator::yawRotation(float radians) {
+Matrix3f LevelCalibrator::yawRotation(float radians) {
     const float c = cosf(radians);
     const float s = sinf(radians);
-    Mat3f r = Mat3f::identity();
+    Matrix3f r = Matrix3f::identity();
     r.m[0][0] = c;    r.m[0][1] = -s;   r.m[0][2] = 0.0f;
     r.m[1][0] = s;    r.m[1][1] = c;    r.m[1][2] = 0.0f;
     r.m[2][0] = 0.0f; r.m[2][1] = 0.0f; r.m[2][2] = 1.0f;
@@ -186,7 +186,7 @@ LevelCalStatus LevelCalibrator::calibrate() {
         return _status;
     }
 
-    Mat3f r;
+    Matrix3f r;
     if (!rotationBetween(measured, _target, r)) {
         _status = LevelCalStatus::FAILED_EXCESSIVE_TILT;
         return _status;
