@@ -1,0 +1,504 @@
+/*
+ * Drone.cpp
+ *
+ *  Created on: Aug 25, 2026
+ *      Author: KAVINDU
+ */
+
+#include "Drone.hpp"
+
+#include <math.h>   // acosf, fabsf, sqrtf
+
+namespace {
+
+constexpr float DEG_TO_RAD = 0.017453292519943295f;
+constexpr float RAD_TO_DEG = 57.29577951308232f;
+constexpr float STANDARD_GRAVITY_MSS = 9.80665f;
+
+// ICM42688P datasheet noise densities, converted to the units
+// setImuNoiseParameters() wants. The bias random walks are not specified by
+// the datasheet; these are conventional starting points, and are the first
+// thing to tune if the filter's bias estimates wander.
+constexpr float IMU_GYRO_NOISE_DENSITY      = 4.9e-5f;  // (rad/s)/sqrt(Hz), 0.0028 dps/sqrt(Hz)
+constexpr float IMU_ACCEL_NOISE_DENSITY     = 6.9e-4f;  // (m/s^2)/sqrt(Hz), 70 ug/sqrt(Hz)
+constexpr float IMU_GYRO_BIAS_RANDOM_WALK   = 1.0e-5f;  // (rad/s)/sqrt(s)
+constexpr float IMU_ACCEL_BIAS_RANDOM_WALK  = 1.0e-4f;  // (m/s^2)/sqrt(s)
+
+// Measurement noise, as standard deviations in each sensor's OWN units.
+//
+// The ESEKF's built-in defaults are 0.05 for both, as variances. For the
+// accelerometer that is sigma = 0.22 m/s^2 against a 9.81 m/s^2 signal, which
+// is reasonable. For the magnetometer it is sigma = 0.22 GAUSS against an
+// Earth field of about 0.47 Gauss -- nearly half the signal -- so the default
+// leaves the only yaw reference barely weighted at all. Set both explicitly
+// here, where the sensor units are actually known.
+constexpr float ACCEL_MEAS_SIGMA = 0.35f;  // m/s^2, covers vibration and tilt modelling error
+constexpr float MAG_MEAS_SIGMA   = 0.05f;  // Gauss, ~10% of Earth field; matches EK3_MAG_M_NSE
+
+// True when `period_ms` has elapsed since `last`, advancing `last` by whole
+// periods so the schedule does not drift. After a long stall it resynchronises
+// to now rather than firing a burst of catch-up iterations, which on a flight
+// controller would be worse than the missed ticks.
+bool due(uint32_t now, uint32_t &last, uint32_t period_ms) {
+	const uint32_t elapsed = now - last; // unsigned: wraps correctly
+	if (elapsed < period_ms) {
+		return false;
+	}
+	last = (elapsed > 4u * period_ms) ? now : (uint32_t) (last + period_ms);
+	return true;
+}
+
+// There is exactly one Drone (main.cpp holds it static), so a file-scope
+// pointer is all the binding the DIAG shim needs. init() sets it.
+Drone *g_drone = nullptr;
+
+} // namespace
+
+Drone::Drone() :
+		_esekf { }, _bootStatus { GLOBALS_INIT_OK }, _lastPredictTick { 0 },
+		_lastMidTick { 0 }, _lastSlowTick { 0 }, _lastPublishTick { 0 },
+		_lastReportedResetTime { 0.0f }, _lastReportedBaroRejects { 0 },
+		_lastReportedEkfFaults { 0 }, _noEstimateSlowLoops { 0 },
+		_loopCount { 0 }, _midCount { 0 }, _slowCount { 0 }, _publishCount { 0 } {
+}
+
+void Drone::init(void) {
+	_bootStatus = Globals_Init();
+	reportBootStatus();
+
+	// Must be set before the estimator is seeded: initialize() builds the NED
+	// magnetic reference from it, and that is what makes yaw absolute rather
+	// than merely repeatable.
+	_esekf.setMagneticDeclination(DRONE_MAGNETIC_DECLINATION_DEG * DEG_TO_RAD);
+
+	// Prefer datasheet noise densities over the constructor's generic defaults.
+	_esekf.setImuNoiseParameters(IMU_GYRO_NOISE_DENSITY, IMU_ACCEL_NOISE_DENSITY,
+			IMU_GYRO_BIAS_RANDOM_WALK, IMU_ACCEL_BIAS_RANDOM_WALK);
+
+	// Measurement noise in the sensors' own units -- see the constants above
+	// for why the estimator's generic defaults are wrong for a Gauss-scale
+	// magnetometer.
+	const float accel_var = ACCEL_MEAS_SIGMA * ACCEL_MEAS_SIGMA;
+	const float mag_var = MAG_MEAS_SIGMA * MAG_MEAS_SIGMA;
+	const float R_accel[3][3] = { { accel_var, 0.0f, 0.0f },
+	                              { 0.0f, accel_var, 0.0f },
+	                              { 0.0f, 0.0f, accel_var } };
+	const float R_mag[3][3] = { { mag_var, 0.0f, 0.0f },
+	                            { 0.0f, mag_var, 0.0f },
+	                            { 0.0f, 0.0f, mag_var } };
+	_esekf.setAccelNoise(R_accel);
+	_esekf.setMagNoise(R_mag);
+
+	// All four rate gates start from the same tick, so nothing is spuriously
+	// due on the first pass just because its `last` was left at zero.
+	const uint32_t now = HAL_GetTick();
+	_lastPredictTick = now;
+	_lastMidTick = now;
+	_lastSlowTick = now;
+	_lastPublishTick = now;
+	_lastReportedResetTime = 0.0f;
+	_lastReportedBaroRejects = 0;
+	_lastReportedEkfFaults = 0;
+	_noEstimateSlowLoops = 0;
+
+	// Bind the DIAG shim -- see Drone_ReportDiagnostics() at the bottom.
+	g_drone = this;
+}
+
+void Drone::reportBootStatus(void) {
+	telemetry.send("$BOOT,%s", (_bootStatus == GLOBALS_INIT_OK) ? "OK" : "DEGRADED");
+
+	if (_bootStatus & GLOBALS_INIT_STORAGE_FAIL) {
+		telemetry.send("$ERR,EEPROM INIT FAILED - CALIBRATION WILL NOT PERSIST");
+	}
+	if (_bootStatus & GLOBALS_INIT_IMU_FAIL) {
+		telemetry.send("$ERR,IMU INIT FAILED");
+	}
+	if (_bootStatus & GLOBALS_INIT_MAG_FAIL) {
+		telemetry.send("$ERR,MAGNETOMETER INIT FAILED");
+	}
+	if (_bootStatus & GLOBALS_INIT_BARO_FAIL) {
+		telemetry.send("$ERR,BAROMETER INIT FAILED");
+	}
+
+	telemetry.send("$STATUS,ACCL,%s,IDLE", calibrator.isAcclCalibrated() ? "CAL" : "UNCAL");
+	telemetry.send("$STATUS,MAG,%s,IDLE", calibrator.isCompassCalibrated() ? "CAL" : "UNCAL");
+}
+
+void Drone::loop(void) {
+	_loopCount++;
+
+	// Host commands first, before anything reads the state they change. A
+	// CANCEL that arrived since the last pass has to take effect BEFORE the
+	// next sample is fed to a running calibration, or the procedure finishes
+	// one sample into a run the operator already stopped.
+	//
+	// This is also the only place commands are acted on: receive() runs in the
+	// USB interrupt and does nothing but buffer bytes, which is what makes
+	// Calibrator single-writer and lock-free. See Telemetry.hpp.
+	telemetry.poll();
+
+	// The fast group runs unconditionally; the rest are dispatched off one
+	// tick read, so every group shares a single clock within the pass.
+	fastLoop();
+
+	const uint32_t now = HAL_GetTick();
+	if (due(now, _lastMidTick, DRONE_MID_LOOP_PERIOD_MS)) {
+		_midCount++;
+		midLoop();
+	}
+	if (due(now, _lastPublishTick, DRONE_PUBLISH_PERIOD_MS)) {
+		_publishCount++;
+		publishState();
+	}
+	if (due(now, _lastSlowTick, DRONE_SLOW_LOOP_PERIOD_MS)) {
+		_slowCount++;
+		slowLoop();
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Fast group: IMU, estimator propagation, accelerometer fusion.
+// ---------------------------------------------------------------------------
+void Drone::fastLoop(void) {
+	imu.update(); // also feeds a running accelerometer calibration
+
+	IMU_Data imu_data;
+	const bool imu_ok = (imu.getData(imu_data) == IMU_StatusTypeDef::OK);
+
+	// A calibration is an operator deliberately tumbling the airframe, and the
+	// sensors hand back uncorrected data while one runs. Feeding either to the
+	// estimator would corrupt it, so stand down until the run finishes. The
+	// sensor read above still happens -- it is what feeds the calibrator.
+	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+		// Keep the clock current so the first step afterwards is one cycle,
+		// not the whole length of the calibration.
+		_lastPredictTick = HAL_GetTick();
+		return;
+	}
+
+	// NOTHING HERE RESETS THE ESTIMATOR, and that is deliberate.
+	//
+	// This used to call _esekf.reset() on a numerical fault and let the seeding
+	// path pick it up again. On a bench that is fine. In the air it is a crash:
+	// reset() leaves the IDENTITY quaternion, so the estimator claims to be
+	// perfectly level, and a controller handed "level" while the aircraft is
+	// banked 25 degrees commands a correction that makes the bank worse. And it
+	// could not recover either -- seeding needs a still airframe to read gravity
+	// from, and an aircraft departing controlled flight is the opposite of still,
+	// so the filter would sit uninitialized and SILENT for the rest of the flight.
+	//
+	// The estimator now repairs itself from its last good state instead (see
+	// checkFinite() in ESEKF.cpp) and keeps flying. All this loop does is report,
+	// which is reportEstimatorHealth()'s job -- and hasDiverged() is now only
+	// reachable from a garbage seed, on the ground, where refusing is correct.
+
+	if (!_esekf.isInitialized()) {
+		seedEstimator(imu_ok, imu_data);
+		return;
+	}
+
+	if (!imu_ok) {
+		return;
+	}
+
+	const uint32_t now = HAL_GetTick();
+	const uint32_t elapsed_ms = now - _lastPredictTick; // unsigned: wraps correctly
+
+	if (elapsed_ms > 0) {
+		_lastPredictTick = now;
+		_esekf.predict(imu_data.gyro, imu_data.accel, (float) elapsed_ms * 0.001f);
+
+		// Fused after the propagation, and only when one happened: fusing the
+		// same sample twice without a predict in between would count the same
+		// information more than once and make the filter overconfident.
+		_esekf.updateAccelerometer(imu_data.accel);
+	}
+	// elapsed_ms == 0 means HAL_GetTick()'s 1 ms resolution has not ticked over
+	// yet. _lastPredictTick is deliberately left alone so the next cycle
+	// integrates the whole interval instead of discarding it.
+}
+
+// ---------------------------------------------------------------------------
+// Mid group: magnetometer and barometer fusion.
+//
+// These sensors run at 80 Hz and 50 Hz. Reading them from the fast loop only
+// re-read registers that had not changed, and re-fusing an unchanged sample
+// counts the same information twice -- the filter grows confident on evidence
+// it already had.
+// ---------------------------------------------------------------------------
+void Drone::midLoop(void) {
+	magnetometer.update(); // also feeds a running compass calibration
+	barometer.update();
+
+	// Same stand-down as the fast group, and for the same reason -- but only
+	// after the reads above, which are what feed a compass calibration.
+	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+		return;
+	}
+	if (!_esekf.isInitialized() || _esekf.hasDiverged()) {
+		return;
+	}
+
+	LIS3MDL_Data mag_data;
+	if (magnetometer.getData(mag_data) == MAG_StatusTypeDef::OK) {
+		_esekf.updateMagnetometer(Vector3f(mag_data.x, mag_data.y, mag_data.z));
+	}
+
+	BMP390_Data baro_data;
+	if (barometer.getData(baro_data) == BARO_StatusTypeDef::OK) {
+		_esekf.updateBarometer((float) baro_data.altitude);
+	}
+
+	// A height-aiding timeout makes the estimator SNAP vertical position to
+	// the barometer rather than fuse its way back, so the estimate is
+	// discontinuous. That is deliberate -- it is how the filter recovers from
+	// a genuinely wrong state -- but it must never be silent: a controller
+	// integrating altitude sees the jump as an enormous instantaneous error.
+	const float reset_t = _esekf.getLastPositionResetTime();
+	if (reset_t != _lastReportedResetTime) {
+		_lastReportedResetTime = reset_t;
+		telemetry.send("$ERR,POSITION RESET %.2f m - ALTITUDE IS DISCONTINUOUS",
+				(double) _esekf.getLastPositionResetDelta().z);
+	}
+
+}
+
+// ---------------------------------------------------------------------------
+// Slow group: the heartbeat, then housekeeping. Reserved for battery
+// monitoring, GPS status, logging and failsafe checks; currently reports
+// sensor health.
+// ---------------------------------------------------------------------------
+void Drone::slowLoop(void) {
+	// Unconditional 1 Hz heartbeat, before anything that can return early.
+	//
+	// Silence from a flight controller is ambiguous: it can mean "nothing to
+	// report" or "the loop stopped", and those need opposite responses. One
+	// line a second removes the ambiguity for about 45 bytes/s, and it is
+	// gated by nothing -- not the estimator, not calibration -- so the only
+	// thing that can stop it is the loop itself stopping.
+	//
+	// pass is the number that matters. If it climbs, the loop is running and
+	// any missing output is a group bailing out. If it is frozen, or the line
+	// stops arriving, the loop really has stopped.
+	telemetry.send("$HB,pass=%lu tick=%lu init=%u div=%u",
+			(unsigned long) _loopCount,
+			(unsigned long) HAL_GetTick(),
+			(unsigned) (_esekf.isInitialized() ? 1 : 0),
+			(unsigned) (_esekf.hasDiverged() ? 1 : 0));
+
+	reportEstimatorHealth();
+
+	// A barometer that starts rejecting samples is failing, and the estimator
+	// would simply coast on its last good height without saying anything.
+	// Report only on change, so a healthy sensor stays silent.
+	const uint32_t rejects = barometer.getRejectedSampleCount();
+	if (rejects != _lastReportedBaroRejects) {
+		_lastReportedBaroRejects = rejects;
+		telemetry.send("$ERR,BAROMETER REJECTED %lu IMPLAUSIBLE SAMPLES",
+				(unsigned long) rejects);
+	}
+}
+
+void Drone::reportEstimatorHealth(void) {
+	// A repaired numerical fault must never be silent. The filter heals itself
+	// now rather than being torn down, and a filter that heals silently is one
+	// whose bugs are never found -- this counter is the only evidence the repair
+	// happened at all. It should read zero for the life of the aircraft.
+	const uint32_t faults = _esekf.getFaultCount();
+	if (faults != _lastReportedEkfFaults) {
+		_lastReportedEkfFaults = faults;
+		telemetry.send("$ERR,EKF NUMERICAL FAULT x%lu - RECOVERED FROM LAST GOOD STATE",
+				(unsigned long) faults);
+	}
+
+	// hasDiverged() now means "went non-finite with nothing to fall back on",
+	// which only a garbage seed can do -- on the ground, before anything flies.
+	// Unrecoverable, so say it every second for as long as it lasts.
+	if (_esekf.hasDiverged()) {
+		telemetry.send("$ERR,EKF DIVERGED - NOT FLYABLE");
+		return;
+	}
+
+	// No attitude at all. publishState() bails out silently in this state, and
+	// silence must not be the only symptom: an operator needs to be told to put
+	// the airframe down and hold it still, not left guessing why the link went
+	// quiet. Seeding needs stillness, and nothing else in the output says so.
+	if (!_esekf.isInitialized()) {
+		_noEstimateSlowLoops++;
+		if (_noEstimateSlowLoops >= DRONE_NO_ESTIMATE_WARN_S) {
+			telemetry.send("$ERR,NO ATTITUDE ESTIMATE %lus - HOLD THE AIRFRAME STILL",
+					(unsigned long) _noEstimateSlowLoops);
+		}
+		return;
+	}
+	_noEstimateSlowLoops = 0;
+}
+
+void Drone::seedEstimator(bool imu_ok, const IMU_Data &imu_data) {
+	// initialize() levels the airframe from the accelerometer and takes its
+	// heading from the magnetometer, so both are required -- seeding attitude
+	// without a heading reference would leave yaw wherever it happened to land.
+	//
+	// The magnetometer and barometer are read by the mid loop; getData() hands
+	// back the last good sample, which is what seeding wants anyway.
+	LIS3MDL_Data mag_data;
+	BMP390_Data baro_data;
+	const bool mag_ok = (magnetometer.getData(mag_data) == MAG_StatusTypeDef::OK);
+	const bool baro_ok = (barometer.getData(baro_data) == BARO_StatusTypeDef::OK);
+
+	if (!imu_ok || !mag_ok) {
+		return;
+	}
+
+	const Vector3f field(mag_data.x, mag_data.y, mag_data.z);
+	if (field.length() < 1e-6f) {
+		return; // no usable heading reference yet
+	}
+
+	// Only seed while stationary. Under acceleration the accelerometer is not
+	// a gravity reference, and the resulting tilt error is baked in permanently
+	// -- the filter has no way to know its starting attitude was wrong.
+	const float specific_force = imu_data.accel.length();
+	if (fabsf(specific_force - STANDARD_GRAVITY_MSS) > DRONE_SEED_STILLNESS_MPS2) {
+		return;
+	}
+
+	// No GPS is wired up yet, so the local NED origin is the zero reference and
+	// position is relative to wherever the vehicle was switched on. Altitude
+	// still works: initialize() takes the barometer reading as the datum and
+	// fuses it as a relative climb from there.
+	const float altitude = baro_ok ? (float) baro_data.altitude : 0.0f;
+	_esekf.initialize(imu_data.accel, field, altitude, Vector3f());
+
+	_lastPredictTick = HAL_GetTick();
+	telemetry.send("$INFO,EKF INITIALIZED");
+}
+
+void Drone::publishState(void) {
+	// Dispatched straight from loop() on its own rate gate, not from inside
+	// midLoop()'s guard, so it carries its own stand-down: a group that
+	// depends on another group's early-return publishes garbage the moment
+	// the dispatch order changes. During a calibration the sensors hand back
+	// uncorrected data, and before the estimator is seeded there is no
+	// attitude at all; either way the numbers would be fiction.
+	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+		return;
+	}
+	if (!_esekf.isInitialized() || _esekf.hasDiverged()) {
+		return;
+	}
+
+	const Vector3f euler = _esekf.getEulerAngles();
+	const ESEKFStatus status = _esekf.getStatus();
+
+	// Angles in degrees. Altitude is metres positive up, relative to wherever
+	// the estimator was seeded -- it is BAROMETRIC: the barometer is the only
+	// height source, fused with the accelerometer, and getAltitude() adds
+	// gps_ref_.z which is zero because no GPS is wired up.
+	telemetry.send("IMU: %.2f Roll, %.2f Pitch, %.2f Yaw, %.2f Altitude",
+			(double) (euler.x * RAD_TO_DEG),
+			(double) (euler.y * RAD_TO_DEG),
+			(double) (euler.z * RAD_TO_DEG),
+			(double) _esekf.getAltitude());
+
+	// The Euler triple above is for a human reading a terminal. It is NOT a
+	// safe basis for anything automatic: ZYX (3-2-1) Euler has a singularity at
+	// pitch = +/-90 deg, where roll and yaw stop being separable and trade off
+	// against each other. That is why a 90 deg pitch on the bench also swings
+	// the reported roll by tens of degrees while the ACTUAL attitude is fine --
+	// the estimator never forms an Euler triple internally, its state is the
+	// quaternion below.
+	//
+	// So publish the quaternion too. It is singularity-free, it is what an AHRS
+	// display or a ground station should draw from (this is exactly why MAVLINK
+	// carries ATTITUDE_QUATERNION alongside ATTITUDE), and it is what a future
+	// attitude controller will take its error from.
+	const Quaternionf q = _esekf.getOrientation();
+	telemetry.send("QUAT: %.4f W, %.4f X, %.4f Y, %.4f Z",
+			(double) q.w, (double) q.x, (double) q.y, (double) q.z);
+
+	// Tilt: the angle between the airframe's Down axis and true Down, i.e. how
+	// far off level it is regardless of heading. R_b^n[2][2] is the Down-Down
+	// term of the rotation matrix, which in quaternion terms is 1 - 2(x^2+y^2);
+	// clamp before acos so rounding at exactly level or exactly inverted cannot
+	// hand it an out-of-domain argument. 0 deg is upright, 90 deg is knife-edge
+	// or nose-vertical, 180 deg is inverted -- one number, no singularity, and
+	// it is the quantity a tilt limit or a crash detector actually wants.
+	float cos_tilt = 1.0f - 2.0f * (q.x * q.x + q.y * q.y);
+	if (cos_tilt > 1.0f) {
+		cos_tilt = 1.0f;
+	} else if (cos_tilt < -1.0f) {
+		cos_tilt = -1.0f;
+	}
+	telemetry.send("TILT: %.2f Tilt", (double) (acosf(cos_tilt) * RAD_TO_DEG));
+
+	// NED position and velocity are deliberately not published: with no GPS
+	// wired up they are unaided dead reckoning from the power-on point, and a
+	// number that looks like a position but drifts without bound is worse than
+	// no number at all.
+	//
+	// The health line stays, because the four numbers above say nothing about
+	// whether to believe them: attitude valid, vertical position aided, yaw
+	// bounded by the magnetometer, and dead reckoning.
+	telemetry.send("EKF: %s Attitude, %s Height, %s Yaw, %s DeadReckon",
+			status.attitude_valid ? "OK" : "BAD",
+			status.vert_pos_valid ? "OK" : "BAD",
+			status.mag_aiding ? "OK" : "BAD",
+			status.dead_reckoning ? "YES" : "NO");
+}
+
+// ---------------------------------------------------------------------------
+// On-demand diagnostics (DIAG command)
+//
+// telemetry.poll() runs at the top of every pass with no rate gate at all, so
+// it is the one thing still reachable when every periodic group has gone
+// quiet -- which is exactly when you need to ask why.
+// ---------------------------------------------------------------------------
+void Drone::reportDiagnostics(void) {
+	// pass climbing means the loop is alive; tick is the clock it dispatches
+	// on. A frozen tick with a climbing pass would be a dead SysTick, which
+	// would stop every rate gate below.
+	telemetry.send("$DIAG,LOOP pass=%lu tick=%lu",
+			(unsigned long) _loopCount,
+			(unsigned long) HAL_GetTick());
+
+	// Each of these should climb at its declared rate. One stuck at 0 or 1
+	// means its gate stopped firing; one climbing with no output on the link
+	// means the group itself is returning early -- see $DIAG,EKF below.
+	telemetry.send("$DIAG,RATE mid=%lu pub=%lu slow=%lu",
+			(unsigned long) _midCount,
+			(unsigned long) _publishCount,
+			(unsigned long) _slowCount);
+
+	// The accelerometer's motion gate, which is the one estimator parameter
+	// that has to be tuned against the airframe rather than reasoned about.
+	// Hover the vehicle and read `motion`: that is the vibration floor, and
+	// `gate` should sit just above it. Too low gates out all attitude aiding;
+	// too high lets a manoeuvre drag the attitude over. `infl` is the extra
+	// measurement sigma the last accepted sample was charged.
+	telemetry.send("$DIAG,ACCEL motion=%.3f gate=%.3f infl=%.2f",
+			(double) _esekf.getAccelMotion(),
+			(double) _esekf.getAccelGateThreshold(),
+			(double) sqrtf(_esekf.getLastAccelNoiseInflation()));
+
+	// publishState() bails out silently on any of these, which looks exactly
+	// like a task that never ran.
+	const ESEKFStatus st = _esekf.getStatus();
+	telemetry.send("$DIAG,EKF init=%u div=%u att=%u vert=%u mag=%u cal=%u",
+			(unsigned) (_esekf.isInitialized() ? 1 : 0),
+			(unsigned) (_esekf.hasDiverged() ? 1 : 0),
+			(unsigned) (st.attitude_valid ? 1 : 0),
+			(unsigned) (st.vert_pos_valid ? 1 : 0),
+			(unsigned) (st.mag_aiding ? 1 : 0),
+			(unsigned) ((calibrator.isAcclCalibrating()
+					|| calibrator.isCompassCalibrating()) ? 1 : 0));
+}
+
+void Drone_ReportDiagnostics(void) {
+	if (g_drone == nullptr) {
+		telemetry.send("$DIAG,NO DRONE BOUND");
+		return;
+	}
+	g_drone->reportDiagnostics();
+}
