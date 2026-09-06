@@ -5,7 +5,7 @@
  *      Author: KAVINDU
  */
 
-#include <ESEKF/ESEKF.hpp>
+#include "ESEKF.hpp"
 
 #include <cmath>
 #include <cstring>
@@ -55,6 +55,13 @@ constexpr double kNeverFused = -1000.0;
 
 // Floor for a variance seeded by a state reset. See resetStateBlockCovariance().
 constexpr float kMinSeedVariance = 1.0e-9f;
+
+// How hard updateAccelerometer() de-weights a sample sitting at the motion
+// gate: R is scaled by 1 + gain*(motion/gate)^2, so at the gate itself the
+// measurement is charged sqrt(1 + 9) ~ 3.2x its nominal sigma. Chosen so a
+// sample on the boundary still contributes something rather than falling off a
+// cliff, while contributing far less than a clean at-rest reading.
+constexpr float kAccelInflationGain = 9.0f;
 
 // M_PI is a POSIX extension, not ISO C++; some arm-none-eabi/newlib setups hide
 // it under a strict -std=c++20. Spell it out rather than depend on that.
@@ -168,6 +175,16 @@ ESEKF::ESEKF()
 	std::memset(R_gps_vel, 0, sizeof(R_gps_vel));
 	R_baro = 1.0f;
 	accel_gate_threshold_ = 1.0f; // m/s^2 (~10% of g) -- tune with setAccelGateThreshold()
+	accel_motion_         = 0.0f;
+	accel_inflation_      = 1.0f;
+
+	last_good_q_          = {1.0f, 0.0f, 0.0f, 0.0f};
+	last_good_velocity_   = {0.0f, 0.0f, 0.0f};
+	last_good_position_   = {0.0f, 0.0f, 0.0f};
+	last_good_gyro_bias_  = {0.0f, 0.0f, 0.0f};
+	last_good_accel_bias_ = {0.0f, 0.0f, 0.0f};
+	have_last_good_       = false;
+	fault_count_          = 0;
 
 	// Generic MEMS-grade placeholders -- override with your IMU's actual
 	// datasheet/Allan-variance figures via setImuNoiseParameters().
@@ -355,6 +372,13 @@ void ESEKF::initialize(const Vector3f &accel, const Vector3f &mag, float altitud
 	// Failing leaves isInitialized() false, and every predict()/update() is
 	// then a no-op until the caller retries with good data. CHECK IT.
 	initialized_ = false;
+
+	// Drop the rollback point: it belongs to the previous alignment, and a state
+	// from before a re-alignment is not something this run may fall back on. It
+	// is re-armed by the health check at the bottom of this function, which is
+	// also what makes a garbage alignment latch diverged_ rather than repair
+	// itself out of a state that no longer applies.
+	have_last_good_ = false;
 
 	if (!isFiniteVec(accel) || !isFiniteVec(mag) || !std::isfinite(altitude) ||
 	    !std::isfinite(gps.z) || !isValidLatLonRad((double)gps.x, (double)gps.y))
@@ -1047,11 +1071,36 @@ void ESEKF::symmetrizeCovariance()
 }
 
 // ---------------------------------------------------------------------------
-// checkFinite(): latches diverged_ if the nominal state or P has gone
-// non-finite. Once latched, predict() and every update() become no-ops, so a
-// single NaN cannot silently propagate into the control loop for the rest of
-// the flight -- the caller sees hasDiverged() and can reset()/re-initialize().
-// Returns true while the filter is healthy.
+// checkFinite(): the filter's numerical health check, run after every
+// propagation and every fusion. Returns true while the filter is healthy.
+//
+// It does three things, in this order:
+//
+//  1. Screens the nominal state and the covariance diagonal for non-finite or
+//     meaningfully negative entries.
+//  2. While healthy, keeps a rolling snapshot of the NOMINAL state. That is the
+//     rollback point, and it costs 16 float stores per call.
+//  3. On a fault, REPAIRS: rolls the nominal state back to that snapshot,
+//     re-seeds P to its initial diagonal, counts the event, and carries on.
+//
+// Step 3 is the part worth explaining, because latching is the obvious design
+// and it is wrong in the air. A latched filter refuses every subsequent
+// predict() and update(), so the aircraft has no attitude at all -- and it
+// cannot get one back, because recovery means re-alignment, re-alignment reads
+// gravity off the accelerometer, and that only works on a stationary airframe.
+// An aircraft that has just lost its estimate is the opposite of stationary, so
+// the filter would sit dead and silent for the remainder of the flight.
+//
+// Rolling back one step is strictly better: one predict step of attitude error
+// is a millisecond of drift, whereas the alternative is no attitude at all. The
+// covariance is NOT rolled back -- a covariance that has gone indefinite is not
+// worth restoring, and re-seeding it to the initial diagonal is both cheaper
+// (no 900-float snapshot on the hot path) and the honest statement of how much
+// the filter still knows: the aiding sources re-tighten it within a second.
+//
+// diverged_ is therefore reached only when there is no rollback point, i.e. the
+// fault came out of initialize() itself. That happens on the ground, before
+// anything flies, and there refusing is exactly right.
 // ---------------------------------------------------------------------------
 bool ESEKF::checkFinite()
 {
@@ -1102,11 +1151,46 @@ bool ESEKF::checkFinite()
 		}
 	}
 
-	if (!ok)
+	if (ok)
 	{
-		diverged_ = true;
+		// Healthy: take the rollback snapshot. Nominal state only -- see the
+		// banner above for why P is deliberately not part of it.
+		last_good_q_           = q;
+		last_good_velocity_    = velocity_NED_;
+		last_good_position_    = position_NED_;
+		last_good_gyro_bias_   = gyro_bias;
+		last_good_accel_bias_  = accel_bias;
+		have_last_good_        = true;
+		return true;
 	}
-	return ok;
+
+	if (fault_count_ < 0xFFFFFFFFU)
+	{
+		fault_count_++;
+	}
+
+	if (!have_last_good_)
+	{
+		// Nothing to roll back to: the fault came from alignment itself. Refuse
+		// to fly rather than invent a state.
+		diverged_ = true;
+		return false;
+	}
+
+	// Repair. The nominal state goes back one step; the covariance is re-seeded
+	// rather than restored, so the filter is honest about having just lost
+	// confidence and the aiding sources tighten it again over the next second.
+	q             = last_good_q_;
+	velocity_NED_ = last_good_velocity_;
+	position_NED_ = last_good_position_;
+	gyro_bias     = last_good_gyro_bias_;
+	accel_bias    = last_good_accel_bias_;
+	angular_rate_ = {0.0f, 0.0f, 0.0f}; // stale rate must not reach a rate controller
+
+	resetCovarianceDefaults();
+	dt_last_ = 0.0f;
+
+	return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -1581,11 +1665,42 @@ bool ESEKF::updateAccelerometer(const Vector3f &accel)
 		return false;
 	}
 
-	float accel_norm   = vectorNorm(accel);
-	float gravity_norm = vectorNorm(g);
-	if (std::fabs(accel_norm - gravity_norm) > accel_gate_threshold_)
+	// How far this reading is from being pure gravity. Recorded before the gate
+	// so getAccelMotion() reports the vibration floor even while every sample is
+	// being rejected -- which is exactly the case the number has to diagnose.
+	const float accel_norm   = vectorNorm(accel);
+	const float gravity_norm = vectorNorm(g);
+	accel_motion_ = std::fabs(accel_norm - gravity_norm);
+
+	// The gate draws the line where the reading stops being a gravity reference
+	// at all. Inside it, trust is graded rather than binary: R is inflated with
+	// the square of how far into the gate the sample sits, so a marginal sample
+	// is de-weighted instead of being taken at full confidence one cycle and
+	// thrown away the next. A bare threshold makes the filter chatter between
+	// full aiding and none for a vehicle hovering right at the limit, and that
+	// shows up as attitude that twitches with throttle.
+	float R_use[3][3];
+	if (accel_gate_threshold_ > 0.0f)
 	{
-		return false; // vehicle is accelerating -- skip, don't corrupt attitude/bias
+		if (accel_motion_ > accel_gate_threshold_)
+		{
+			return false; // real acceleration -- skip, don't corrupt attitude/bias
+		}
+
+		const float ratio = accel_motion_ / accel_gate_threshold_; // [0, 1]
+		accel_inflation_ = 1.0f + kAccelInflationGain * ratio * ratio;
+	}
+	else
+	{
+		accel_inflation_ = 1.0f; // gate disabled: no grading either
+	}
+
+	for (int i = 0; i < 3; ++i)
+	{
+		for (int j = 0; j < 3; ++j)
+		{
+			R_use[i][j] = R_accel[i][j] * accel_inflation_;
+		}
 	}
 
 	float R[3][3];
@@ -1617,7 +1732,7 @@ bool ESEKF::updateAccelerometer(const Vector3f &accel)
 		H[i][12 + i] = 1.0f; // d(z)/d(dba)
 	}
 
-	return kalmanUpdate(innovation, H, R_accel);
+	return kalmanUpdate(innovation, H, R_use);
 }
 
 // ---------------------------------------------------------------------------
@@ -2091,6 +2206,15 @@ void ESEKF::reset()
 	initialized_ = false;
 	diverged_    = false;
 
+	// The rollback point describes a state this filter no longer holds.
+	// fault_count_ deliberately survives -- it is a record of what happened to
+	// this airframe, not filter state, and clearing it would hide a fault that
+	// was followed by a reset.
+	have_last_good_ = false;
+
+	accel_motion_    = 0.0f;
+	accel_inflation_ = 1.0f;
+
 	filter_time_           = 0.0;
 	last_gps_pos_fuse_t_   = kNeverFused;
 	last_gps_vel_fuse_t_   = kNeverFused;
@@ -2120,6 +2244,11 @@ bool ESEKF::isInitialized() const
 bool ESEKF::hasDiverged() const
 {
 	return diverged_;
+}
+
+uint32_t ESEKF::getFaultCount() const
+{
+	return fault_count_;
 }
 
 // ---------------------------------------------------------------------------
@@ -2377,6 +2506,8 @@ void ESEKF::setAccelGateThreshold(float threshold_mps2)
 	accel_gate_threshold_ = threshold_mps2;
 }
 float ESEKF::getAccelGateThreshold() const               { return accel_gate_threshold_; }
+float ESEKF::getAccelMotion() const                      { return accel_motion_; }
+float ESEKF::getLastAccelNoiseInflation() const          { return accel_inflation_; }
 
 // ---------------------------------------------------------------------------
 // Reference / environment getters / setters

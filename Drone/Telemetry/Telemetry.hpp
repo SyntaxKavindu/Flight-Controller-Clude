@@ -28,10 +28,13 @@
  *         CALIMU           six-position accelerometer calibration
  *         CALIMU,TUMBLE    tumble (ellipsoid) accelerometer calibration
  *         CALMAG           magnetometer calibration
+ *         CALLEVEL         board levelling; needs a finished CALIMU behind it
+ *         CALLEVEL,<deg>   ... with a known mounting yaw, degrees
  *         READY            in position and holding still (six-position step)
  *         CANCEL           abort whatever calibration is running
  *         CALCLEAR         erase the stored calibration
  *         CALSTATUS        report what is calibrated / in progress
+ *         DIAG             dump loop counters and estimator health
  *
  * Out : one record per line, "$KEY,fields...\r\n". Callers build the record;
  *       this class frames and sends it.

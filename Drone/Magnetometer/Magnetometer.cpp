@@ -82,7 +82,13 @@ void Magnetometer::update(void) {
 		if (_calibrator->isCompassCalibrating()) {
 			_calibrator->calibrateCompass(field);
 		}
+		// Hard/soft-iron correction in the sensor's own axes first, then the
+		// board rotation -- the same order, and for the same reason, as the
+		// accelerometer path in Imu::update(). The magnetometer is on the same
+		// board as the IMU, so it takes the same rotation; leaving it out would
+		// put heading in a different frame from roll and pitch.
 		_calibrator->correctCompassData(field);
+		_calibrator->correctBoardFrame(field);
 	}
 
 	sample.x = field.x;

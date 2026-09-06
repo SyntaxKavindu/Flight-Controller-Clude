@@ -114,6 +114,13 @@ public:
 	// yaw_offset_deg: mounting rotation about the vertical, which gravity
 	// cannot observe. See LevelCalibrator::begin().
 	void startLevelCalibration(float yaw_offset_deg = 0.0f);
+
+	// Feed the RAW (axis-remapped, uncorrected) accelerometer sample, exactly as
+	// calibrateAccelerometer() takes it. The accelerometer correction is applied
+	// inside, because the levelling fit is only meaningful on top of a finished
+	// accelerometer calibration and having one caller pass corrected data and
+	// another raw is the kind of mistake that produces a plausible, wrong
+	// rotation rather than an error.
 	void calibrateLevel(Vector3f &acclData);
 
 	// Feed one sample per loop while a procedure is running. Ignored when
@@ -139,6 +146,31 @@ public:
 	bool isAcclCalibrating() const { return _isAccelCalibrating; }
 	bool isCompassCalibrating() const { return _isCompassCalibrating; }
 	bool isLevelCalibrating() const { return _isLevelCalibrating; }
+
+	// True while ANY procedure is running. This is the predicate the flight
+	// stack should stand down on, and the one a command handler should refuse
+	// on: a calibration means an operator is deliberately moving the airframe
+	// and the sensor frontends are handing back data that is uncorrected, being
+	// corrected against gains that are about to change, or both.
+	//
+	// Spelling it out at each call site as an OR of the three flags is how the
+	// levelling procedure came to be left out of every one of them -- the checks
+	// were written when there were only two.
+	bool isCalibrating() const {
+		return _isAccelCalibrating || _isCompassCalibrating || _isLevelCalibrating;
+	}
+
+	// Bumped every time the APPLIED correction changes: a procedure succeeded,
+	// a stored calibration was restored at boot, or the calibration was erased.
+	//
+	// This is what lets the estimator notice. A new calibration silently changes
+	// what every subsequent sample means -- a different accelerometer scale, a
+	// different magnetic frame, a board rotation that was not there a moment ago
+	// -- and an attitude filter carrying state built on the OLD gains will fuse
+	// the new samples as though the vehicle had moved. Watch this and re-seed
+	// when it changes; a counter rather than a flag so a consumer that polls
+	// slowly cannot miss one.
+	uint32_t getCalibrationEpoch() const { return _calibrationEpoch; }
 	bool isAcclCalibrated() const { return _isAccelCalibrated; }
 	bool isCompassCalibrated() const { return _isCompassCalibrated; }
 	bool isLevelCalibrated() const { return _isLevelCalibrated; }
@@ -177,6 +209,9 @@ private:
 	bool _awaitingPosition;
 	uint16_t _progressThrottle;
 
+	// See getCalibrationEpoch().
+	uint32_t _calibrationEpoch;
+
 	// The applied correction, held here rather than read back out of the
 	// calibrator objects on every sample: a calibration restored from EEPROM
 	// has no estimator state behind it, so the facade has to own the gains for
@@ -192,6 +227,18 @@ private:
 	// Pull the finished gains out of a calibrator into the affine form above.
 	void adoptAccelResult();
 	void adoptCompassResult();
+
+	// Every path that changes an applied gain goes through this, so no path can
+	// change one without the estimator being told. See getCalibrationEpoch().
+	void noteGainsChanged() { _calibrationEpoch++; }
+
+	// Shared front half of every start*() entry point: refuses if a procedure is
+	// already running, and puts the shared sequencing state back to a known
+	// point. Returns false when the caller must not start.
+	bool beginProcedure(const char *stage);
+
+	// Tear down whatever is running, silently. True if anything was.
+	bool stopProcedures();
 
 	// Reports a procedure that has stopped making progress and tears it down,
 	// so a wedged calibration ends in a failure the operator can act on

@@ -81,33 +81,49 @@
 // ---------------------------------------------------------------------------
 // Loop rates.
 //
-// The fast loop runs on every call of loop(), which free-runs: it reads the
-// IMU, propagates the estimator and fuses the accelerometer. Attitude is only
-// as good as how often it is integrated, so this is the one that wants to be
-// quick -- real flight controllers put it between 400 Hz and 8 kHz.
+// EVERY group is dispatched from loop() off HAL_GetTick(), the 1 ms SysTick.
+// One clock, one place, no cycle counter: DWT is not enabled here, and nothing
+// in this scheduler needs sub-millisecond resolution.
 //
-// The mid loop runs the magnetometer and barometer. Those parts are configured
-// at 80 Hz and 50 Hz respectively, so polling them faster only re-reads
-// registers that have not changed -- and re-fusing a sample the filter has
-// already seen counts the same information twice and makes it overconfident,
-// exactly the reason the accelerometer is only fused when a predict actually
-// happened. 50 Hz matches the slower of the two sensors.
+// The fast group reads the IMU, propagates the estimator and fuses the
+// accelerometer. It is RATE GATED at 1 kHz rather than free-running, and that
+// is the whole reason 1 ms resolution is enough: the ICM-42688-P is configured
+// for a 1 kHz output data rate (see ICM42688P::init()), so one pass per
+// millisecond reads each sample exactly once.
 //
-// The slow loop is for housekeeping that does not belong in either: battery
+// It used to run on every call of loop() instead. On an F7 that is several
+// thousand passes a second, so most of them spent a full SPI burst re-reading
+// a register set that had not changed since the last one, then threw the result
+// away -- predict() only integrates when the millisecond ticks over, and
+// everything in between was discarded. Gating here is what makes the sample the
+// estimator integrates the sample that was actually just read, and it hands the
+// spare SPI bandwidth and CPU back.
+//
+// The mid group runs the magnetometer and barometer, configured at 80 Hz and
+// 50 Hz. Polling them faster only re-reads unchanged registers -- and re-fusing
+// a sample the filter has already seen counts the same information twice and
+// makes it overconfident, exactly the reason the accelerometer is only fused
+// when a predict actually happened. 50 Hz matches the slower of the two.
+//
+// The slow group is for housekeeping that belongs in neither: battery
 // monitoring, GPS status, logging, failsafe checks. It currently emits the
 // heartbeat and reports sensor health, and is otherwise reserved.
 //
-// All three are dispatched from loop() off HAL_GetTick(), which is 1 ms. That
-// is coarse -- it is why there is no rate gate on the fast group, and why the
-// mid and slow periods are whole milliseconds. A cooperative scheduler with
-// per-task budgets belongs here eventually; it needs a microsecond clock
-// first, which is a timer that is not wired up yet.
+// Every period below must be a whole number of milliseconds, which is what
+// bounds the fast group at 1 kHz. A faster inner loop needs a hardware timer
+// as its time base, not a shorter tick -- but nothing on this airframe samples
+// faster than 1 kHz, so there is nothing to gain from one yet.
 // ---------------------------------------------------------------------------
+#define DRONE_FAST_LOOP_HZ             1000
 #define DRONE_MID_LOOP_HZ                50
 #define DRONE_SLOW_LOOP_HZ                1
 
+#define DRONE_FAST_LOOP_PERIOD_MS        (1000u / DRONE_FAST_LOOP_HZ)
 #define DRONE_MID_LOOP_PERIOD_MS         (1000u / DRONE_MID_LOOP_HZ)
 #define DRONE_SLOW_LOOP_PERIOD_MS        (1000u / DRONE_SLOW_LOOP_HZ)
+
+static_assert(DRONE_FAST_LOOP_PERIOD_MS >= 1u,
+		"HAL_GetTick() is 1 ms: the fast group cannot be dispatched faster than 1 kHz");
 
 // State is published on its own rate gate, off the same tick. At the default
 // this is 10 Hz -- fast enough to plot, slow enough to read in a terminal.
@@ -142,6 +158,23 @@
 // down -- stays quiet, short enough that a real failure is obvious.
 #define DRONE_NO_ESTIMATE_WARN_S         3u
 
+// Accelerometer motion gate, m/s^2: how far |accel| may sit from 1 g before the
+// sample stops being treated as a gravity reference at all. This is the one
+// estimator parameter that has to be measured on the airframe rather than
+// reasoned about, so it is set here rather than left at the filter's generic
+// default -- hover the vehicle, read `motion` from $DIAG,ACCEL, and put this
+// just above the figure it settles at. Too low gates out all attitude aiding;
+// too high lets a manoeuvre drag the attitude over. Samples inside the gate are
+// de-weighted smoothly with how close to it they sit, so this is a limit rather
+// than a cliff -- see ESEKF::getLastAccelNoiseInflation().
+//
+// Left at the value the estimator's own constructor used, so setting it here
+// changes nothing today; the point is that it is now visible and tunable in the
+// same file as the loop rates rather than buried in a filter default. Widening
+// it is safer than it used to be -- a sample near the limit is de-weighted, not
+// taken at face value -- but widen it against a measurement, not on principle.
+#define DRONE_ACCEL_GATE_MPS2            1.0f
+
 class Drone {
 public:
 	Drone();
@@ -149,9 +182,11 @@ public:
 	// Brings up the globals and configures the estimator. Call once.
 	void init(void);
 
-	// Call it in a tight while(1). It free-runs rather than pacing itself:
-	// the fast group runs every pass, and the mid, publish and slow groups are
-	// dispatched off HAL_GetTick() when their periods come due.
+	// Call it in a tight while(1). Every group -- fast, mid, publish, slow --
+	// is dispatched off HAL_GetTick() when its period comes due, from a single
+	// tick read per pass so they all share one clock. Passes between due dates
+	// only drain the command link, which is what keeps a CANCEL responsive
+	// without costing a sensor read.
 	void loop(void);
 
 	// Dumps the loop counters and the estimator's health on demand. Answers
@@ -164,6 +199,7 @@ private:
 
 	uint8_t _bootStatus;        // GlobalsInitStatus bitmask from init()
 	uint32_t _lastPredictTick;  // HAL_GetTick() at the last integrated step
+	uint32_t _lastFastTick;
 	uint32_t _lastMidTick;
 	uint32_t _lastSlowTick;
 	uint32_t _lastPublishTick;
@@ -172,17 +208,23 @@ private:
 	uint32_t _lastReportedEkfFaults;
 	uint32_t _noEstimateSlowLoops;  // consecutive 1 Hz passes with no estimator
 
+	// Calibrator::getCalibrationEpoch() as of the last time the estimator was
+	// seeded. A change means the applied correction moved under the filter --
+	// see the re-seed in fastLoop().
+	uint32_t _calibrationEpoch;
+
 	// Pass counters. Not statistics -- diagnostics. A frozen _loopCount means
 	// the loop stopped; a climbing _loopCount with a frozen _midCount means a
 	// rate gate stopped firing; both climbing with no output means the group
 	// itself is returning early. Those three need opposite responses and are
 	// otherwise indistinguishable from a silent link.
 	uint32_t _loopCount;
+	uint32_t _fastCount;
 	uint32_t _midCount;
 	uint32_t _slowCount;
 	uint32_t _publishCount;
 
-	// IMU, estimator propagation, accelerometer fusion. Runs on every call.
+	// IMU, estimator propagation, accelerometer fusion. DRONE_FAST_LOOP_HZ.
 	void fastLoop(void);
 	// Magnetometer and barometer fusion. DRONE_MID_LOOP_HZ.
 	void midLoop(void);

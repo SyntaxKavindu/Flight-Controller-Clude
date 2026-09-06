@@ -48,6 +48,15 @@ bool due(uint32_t now, uint32_t &last, uint32_t period_ms) {
 	return true;
 }
 
+// getLastPositionResetTime() returns a large negative sentinel until a reset
+// has actually happened, so "no reset yet" has to be seeded with that same
+// value rather than with zero. Seeded with 0.0f, the very first mid loop
+// compared -1000 against 0, decided they differed, and announced a position
+// reset on every boot -- reporting the estimator as discontinuous at exactly
+// the moment it was fine. Any value below the sentinel's magnitude works as
+// the guard; this matches it.
+constexpr float ESEKF_NEVER_RESET = -1000.0f;
+
 // There is exactly one Drone (main.cpp holds it static), so a file-scope
 // pointer is all the binding the DIAG shim needs. init() sets it.
 Drone *g_drone = nullptr;
@@ -56,10 +65,13 @@ Drone *g_drone = nullptr;
 
 Drone::Drone() :
 		_esekf { }, _bootStatus { GLOBALS_INIT_OK }, _lastPredictTick { 0 },
-		_lastMidTick { 0 }, _lastSlowTick { 0 }, _lastPublishTick { 0 },
-		_lastReportedResetTime { 0.0f }, _lastReportedBaroRejects { 0 },
+		_lastFastTick { 0 }, _lastMidTick { 0 }, _lastSlowTick { 0 },
+		_lastPublishTick { 0 },
+		_lastReportedResetTime { ESEKF_NEVER_RESET }, _lastReportedBaroRejects { 0 },
 		_lastReportedEkfFaults { 0 }, _noEstimateSlowLoops { 0 },
-		_loopCount { 0 }, _midCount { 0 }, _slowCount { 0 }, _publishCount { 0 } {
+		_calibrationEpoch { 0 },
+		_loopCount { 0 }, _fastCount { 0 }, _midCount { 0 }, _slowCount { 0 },
+		_publishCount { 0 } {
 }
 
 void Drone::init(void) {
@@ -89,17 +101,26 @@ void Drone::init(void) {
 	_esekf.setAccelNoise(R_accel);
 	_esekf.setMagNoise(R_mag);
 
-	// All four rate gates start from the same tick, so nothing is spuriously
-	// due on the first pass just because its `last` was left at zero.
+	// The motion gate is airframe-specific, so it is set from Drone.hpp rather
+	// than left at the filter's generic default -- see DRONE_ACCEL_GATE_MPS2.
+	_esekf.setAccelGateThreshold(DRONE_ACCEL_GATE_MPS2);
+
+	// Every rate gate starts from the same tick, so nothing is spuriously due on
+	// the first pass just because its `last` was left at zero.
 	const uint32_t now = HAL_GetTick();
 	_lastPredictTick = now;
+	_lastFastTick = now;
 	_lastMidTick = now;
 	_lastSlowTick = now;
 	_lastPublishTick = now;
-	_lastReportedResetTime = 0.0f;
-	_lastReportedBaroRejects = 0;
-	_lastReportedEkfFaults = 0;
+	_lastReportedResetTime = ESEKF_NEVER_RESET;
+	_lastReportedBaroRejects = barometer.getRejectedSampleCount();
+	_lastReportedEkfFaults = _esekf.getFaultCount();
 	_noEstimateSlowLoops = 0;
+
+	// Baseline: seeding is about to happen against exactly these gains, so only
+	// a LATER change has to force a re-seed.
+	_calibrationEpoch = calibrator.getCalibrationEpoch();
 
 	// Bind the DIAG shim -- see Drone_ReportDiagnostics() at the bottom.
 	g_drone = this;
@@ -123,6 +144,12 @@ void Drone::reportBootStatus(void) {
 
 	telemetry.send("$STATUS,ACCL,%s,IDLE", calibrator.isAcclCalibrated() ? "CAL" : "UNCAL");
 	telemetry.send("$STATUS,MAG,%s,IDLE", calibrator.isCompassCalibrated() ? "CAL" : "UNCAL");
+	// Reported like the other two. An uncalibrated board mounting is not an
+	// error -- a squarely mounted board needs no rotation -- but it is the
+	// difference between "roll and pitch are true" and "roll and pitch are
+	// whatever angle the board happens to be bolted at", and nothing else in
+	// the output distinguishes them.
+	telemetry.send("$STATUS,LEVEL,%s,IDLE", calibrator.isLevelCalibrated() ? "CAL" : "UNCAL");
 }
 
 void Drone::loop(void) {
@@ -138,11 +165,19 @@ void Drone::loop(void) {
 	// Calibrator single-writer and lock-free. See Telemetry.hpp.
 	telemetry.poll();
 
-	// The fast group runs unconditionally; the rest are dispatched off one
-	// tick read, so every group shares a single clock within the pass.
-	fastLoop();
-
+	// One tick read for the whole pass, so every group is dispatched against a
+	// single clock -- two reads either side of a millisecond boundary would let
+	// the groups disagree about what time it is within one iteration.
 	const uint32_t now = HAL_GetTick();
+
+	// The fast group is gated like the rest. It used to run unconditionally,
+	// which on this MCU meant several IMU reads per millisecond of which all but
+	// the last were discarded -- the part only produces a new sample at 1 kHz.
+	// See the loop-rate banner in Drone.hpp.
+	if (due(now, _lastFastTick, DRONE_FAST_LOOP_PERIOD_MS)) {
+		_fastCount++;
+		fastLoop();
+	}
 	if (due(now, _lastMidTick, DRONE_MID_LOOP_PERIOD_MS)) {
 		_midCount++;
 		midLoop();
@@ -166,18 +201,45 @@ void Drone::fastLoop(void) {
 	IMU_Data imu_data;
 	const bool imu_ok = (imu.getData(imu_data) == IMU_StatusTypeDef::OK);
 
-	// A calibration is an operator deliberately tumbling the airframe, and the
+	// A calibration is an operator deliberately handling the airframe, and the
 	// sensors hand back uncorrected data while one runs. Feeding either to the
 	// estimator would corrupt it, so stand down until the run finishes. The
 	// sensor read above still happens -- it is what feeds the calibrator.
-	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+	//
+	// isCalibrating() covers all three procedures. Spelled out as an OR of the
+	// two flags, as it was here and at three other sites, the levelling run was
+	// simply left out and the estimator kept integrating through it.
+	if (calibrator.isCalibrating()) {
 		// Keep the clock current so the first step afterwards is one cycle,
 		// not the whole length of the calibration.
 		_lastPredictTick = HAL_GetTick();
 		return;
 	}
 
-	// NOTHING HERE RESETS THE ESTIMATOR, and that is deliberate.
+	// A finished calibration silently changes what every later sample MEANS: a
+	// different accelerometer scale, a different magnetic frame, or a board
+	// rotation that was not being applied a moment ago. The filter's state was
+	// built on the old gains, so the first corrected sample after the change
+	// arrives looking like the vehicle moved -- the estimator would fuse a step
+	// that never physically happened, and a large one would be gated out, which
+	// is worse: it recovers slowly and silently.
+	//
+	// So re-align instead. This is a ground procedure on a stationary airframe,
+	// which is exactly the condition seeding needs anyway.
+	const uint32_t epoch = calibrator.getCalibrationEpoch();
+	if (epoch != _calibrationEpoch) {
+		_calibrationEpoch = epoch;
+		_esekf.reset();
+		_lastReportedResetTime = ESEKF_NEVER_RESET;
+		telemetry.send("$INFO,CALIBRATION CHANGED - RESEEDING ESTIMATOR");
+		// Falls through to the seeding path below on this same pass.
+	}
+
+	// NOTHING BELOW RESETS THE ESTIMATOR ON A FAULT, and that is deliberate.
+	//
+	// The re-seed above is a different thing entirely: it is triggered by an
+	// operator finishing a calibration on the ground, where the airframe is
+	// stationary and re-alignment is guaranteed to work. A fault is not.
 	//
 	// This used to call _esekf.reset() on a numerical fault and let the seeding
 	// path pick it up again. On a bench that is fine. In the air it is a crash:
@@ -233,7 +295,7 @@ void Drone::midLoop(void) {
 
 	// Same stand-down as the fast group, and for the same reason -- but only
 	// after the reads above, which are what feed a compass calibration.
-	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+	if (calibrator.isCalibrating()) {
 		return;
 	}
 	if (!_esekf.isInitialized() || _esekf.hasDiverged()) {
@@ -371,6 +433,14 @@ void Drone::seedEstimator(bool imu_ok, const IMU_Data &imu_data) {
 	const float altitude = baro_ok ? (float) baro_data.altitude : 0.0f;
 	_esekf.initialize(imu_data.accel, field, altitude, Vector3f());
 
+	// initialize() restarts the filter clock and clears its reset history, so
+	// the previous alignment's reset timestamp is meaningless now -- keeping it
+	// would make the next comparison in midLoop() fire against a stale value.
+	_lastReportedResetTime = ESEKF_NEVER_RESET;
+
+	// Whatever gains are in force now are the ones this alignment was built on.
+	_calibrationEpoch = calibrator.getCalibrationEpoch();
+
 	_lastPredictTick = HAL_GetTick();
 	telemetry.send("$INFO,EKF INITIALIZED");
 }
@@ -382,7 +452,7 @@ void Drone::publishState(void) {
 	// the dispatch order changes. During a calibration the sensors hand back
 	// uncorrected data, and before the estimator is seeded there is no
 	// attitude at all; either way the numbers would be fiction.
-	if (calibrator.isAcclCalibrating() || calibrator.isCompassCalibrating()) {
+	if (calibrator.isCalibrating()) {
 		return;
 	}
 	if (!_esekf.isInitialized() || _esekf.hasDiverged()) {
@@ -466,7 +536,8 @@ void Drone::reportDiagnostics(void) {
 	// Each of these should climb at its declared rate. One stuck at 0 or 1
 	// means its gate stopped firing; one climbing with no output on the link
 	// means the group itself is returning early -- see $DIAG,EKF below.
-	telemetry.send("$DIAG,RATE mid=%lu pub=%lu slow=%lu",
+	telemetry.send("$DIAG,RATE fast=%lu mid=%lu pub=%lu slow=%lu",
+			(unsigned long) _fastCount,
 			(unsigned long) _midCount,
 			(unsigned long) _publishCount,
 			(unsigned long) _slowCount);
@@ -491,8 +562,7 @@ void Drone::reportDiagnostics(void) {
 			(unsigned) (st.attitude_valid ? 1 : 0),
 			(unsigned) (st.vert_pos_valid ? 1 : 0),
 			(unsigned) (st.mag_aiding ? 1 : 0),
-			(unsigned) ((calibrator.isAcclCalibrating()
-					|| calibrator.isCompassCalibrating()) ? 1 : 0));
+			(unsigned) (calibrator.isCalibrating() ? 1 : 0));
 }
 
 void Drone_ReportDiagnostics(void) {

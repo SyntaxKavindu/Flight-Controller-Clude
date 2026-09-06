@@ -92,14 +92,37 @@ void Imu::update(void) {
 	sample.gyro = remapGyro(sample.gyro);
 
 	if (_calibrator != nullptr) {
-		// While a procedure is running this is the only place raw samples
-		// come from, so feed it here. correctAcclData() is a no-op until a
-		// calibration has actually succeeded, so the order is safe: during
-		// calibration the sample is collected and passed through untouched.
+		// While a procedure is running this is the only place raw samples come
+		// from, so feed it here, BEFORE any correction. Both procedures want the
+		// raw reading: the accelerometer fit is what produces the correction, and
+		// the levelling fit applies the correction itself (see
+		// Calibrator::calibrateLevel) precisely so that this call site cannot get
+		// the ordering wrong.
+		//
+		// They are mutually exclusive -- Calibrator::beginProcedure() refuses to
+		// start one while another runs -- so `else if` is not merely an
+		// optimisation, it states that.
 		if (_calibrator->isAcclCalibrating()) {
 			_calibrator->calibrateAccelerometer(sample.accel);
+		} else if (_calibrator->isLevelCalibrating()) {
+			_calibrator->calibrateLevel(sample.accel);
 		}
+
+		// Sensor correction first (bias and scale, in the accelerometer's own
+		// axes), then the board rotation. The two do not commute: the fit was
+		// made in the axes the chip actually reads in, so rotating first would
+		// apply per-axis gains to axes they were not measured on.
 		_calibrator->correctAcclData(sample.accel);
+
+		// The board rotation describes the BOARD, so it goes on the gyro too.
+		// Correcting one and not the other leaves them disagreeing about which
+		// way the airframe points, and the estimator would then integrate
+		// rotations in one frame while levelling against another -- attitude
+		// that drifts only under motion, which is the hardest failure to spot.
+		// There is no gyro path through the Calibrator for exactly this reason;
+		// see the note on Calibrator::correctBoardFrame().
+		_calibrator->correctBoardFrame(sample.accel);
+		_calibrator->correctBoardFrame(sample.gyro);
 	}
 
 	_data = sample;
