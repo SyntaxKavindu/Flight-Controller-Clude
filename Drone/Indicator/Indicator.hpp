@@ -20,11 +20,12 @@
  *
  *   - update() never blocks and never allocates. It is safe to call from the
  *     main dispatcher at any rate above ~2x the slot rate.
- *   - a state the class was never told about is DISARMED / UNLOCKED / ERROR.
- *     Reporting "OK" because nobody has said otherwise is a lie an operator
- *     acts on. Note that DISARMED is now DARK, so this shows up as an unlit
- *     arm LED rather than as a distinct pattern -- see the pattern table for
- *     what that costs and what pays for it.
+ *   - a state the class was never told about is DISARMED / UNLOCKED / ERROR,
+ *     never OK. Reporting "OK" because nobody has said otherwise is a lie an
+ *     operator acts on.
+ *   - no state is dark. An unlit LED is indistinguishable from a dead LED, a
+ *     wrong pin, or a hung loop, so darkness is reserved for meaning exactly
+ *     that. See the pattern table.
  *
  * Wiring lives at the definition of the global `indicator` in Globals.cpp.
  */
@@ -75,27 +76,37 @@ struct IndicatorLed {
 // Patterns, LSB first: bit n is slot n, 1 = lit. Written MSB-left in the
 // comments so the drawing reads the way the light does.
 //
-// The scheme is "dark is the resting state": an LED that is doing nothing means
-// nothing to report, and any light at all is information. That is the opposite
-// of the usual embedded convention, where a heartbeat blink proves the board is
-// alive, and it costs something real -- a healthy, disarmed airframe shows a
-// COMPLETELY DARK PANEL, which is indistinguishable from an unpowered board,
-// hung firmware, or three LEDs on the wrong pins.
+// One rule across all three channels:
 //
-// What buys that back is the lamp test at init(): every LED is lit for
-// INDICATOR_LAMP_TEST_MS at power-up, so each boot proves the pins, the LEDs
-// and the active level before the panel goes quiet. With the resting state
-// dark, that test is not a nicety any more -- it is the only evidence the panel
-// works at all, so do not shorten or remove it.
+//     SOLID = the good state    BLINK = wanting attention
+//
+// and NOTHING is dark. That is the property worth protecting, not the
+// prettiness: a dark LED would otherwise mean either "this state" or "dead LED
+// / wrong pin / wrong active level / hung loop / no power", and no glance can
+// separate those. With every state lit, one look settles it -- a dark LED is
+// always a fault, and a lit one has already proved the whole chain works before
+// it says anything about the aircraft.
+//
+// So do not give any state INDICATOR_PAT_OFF. It exists to initialise and to
+// say "no pattern", not as something a state maps to. The lamp test at init()
+// still lights everything for INDICATOR_LAMP_TEST_MS at power-up, which now
+// confirms the panel rather than being the only evidence it works.
+//
+// The three blink patterns differ from each other on purpose. They are on
+// separate LEDs so they never have to be told apart, but an urgent strobe, a
+// calm slow blink and a searching double-blink read as different KINDS of
+// attention, which is free to provide and hard to add later.
 //
 //                                        slot 0 is the RIGHTMOST bit
-#define INDICATOR_PAT_OFF        0x0000u  // ................  dark: nothing to say
-#define INDICATOR_PAT_SYS_OK     INDICATOR_PAT_OFF
-#define INDICATOR_PAT_SYS_ERROR  0x5555u  // .X.X.X.X.X.X.X.X  100 ms strobe
-#define INDICATOR_PAT_ARM_SAFE   INDICATOR_PAT_OFF
-#define INDICATOR_PAT_ARM_LIVE   0xFFFFu  // XXXXXXXXXXXXXXXX  solid: props live
-#define INDICATOR_PAT_GPS_SEARCH 0x0303u  // ......XX......XX  double blink
-#define INDICATOR_PAT_GPS_FIX    0xFFFFu  // XXXXXXXXXXXXXXXX  solid: has a fix
+#define INDICATOR_PAT_OFF        0x0000u  // ................  not a state; see above
+#define INDICATOR_PAT_SOLID      0xFFFFu  // XXXXXXXXXXXXXXXX  lit, the good case
+
+#define INDICATOR_PAT_SYS_OK     INDICATOR_PAT_SOLID
+#define INDICATOR_PAT_SYS_ERROR  0x5555u  // .X.X.X.X.X.X.X.X  100 ms strobe: urgent
+#define INDICATOR_PAT_ARM_SAFE   0x00FFu  // ........XXXXXXXX  800/800: calm, safe
+#define INDICATOR_PAT_ARM_LIVE   INDICATOR_PAT_SOLID          // props live
+#define INDICATOR_PAT_GPS_SEARCH 0x0303u  // ......XX......XX  double blink: searching
+#define INDICATOR_PAT_GPS_FIX    INDICATOR_PAT_SOLID          // has a fix
 
 class Indicator {
 public:
