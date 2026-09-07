@@ -20,9 +20,11 @@
  *
  *   - update() never blocks and never allocates. It is safe to call from the
  *     main dispatcher at any rate above ~2x the slot rate.
- *   - a state the class was never told about is DISARMED / UNLOCKED / ERROR,
- *     not "off". An LED that is simply dark is indistinguishable from a dead
- *     LED, a wrong pin, or a hung loop, so no state maps to permanent darkness.
+ *   - a state the class was never told about is DISARMED / UNLOCKED / ERROR.
+ *     Reporting "OK" because nobody has said otherwise is a lie an operator
+ *     acts on. Note that DISARMED is now DARK, so this shows up as an unlit
+ *     arm LED rather than as a distinct pattern -- see the pattern table for
+ *     what that costs and what pays for it.
  *
  * Wiring lives at the definition of the global `indicator` in Globals.cpp.
  */
@@ -73,10 +75,24 @@ struct IndicatorLed {
 // Patterns, LSB first: bit n is slot n, 1 = lit. Written MSB-left in the
 // comments so the drawing reads the way the light does.
 //
+// The scheme is "dark is the resting state": an LED that is doing nothing means
+// nothing to report, and any light at all is information. That is the opposite
+// of the usual embedded convention, where a heartbeat blink proves the board is
+// alive, and it costs something real -- a healthy, disarmed airframe shows a
+// COMPLETELY DARK PANEL, which is indistinguishable from an unpowered board,
+// hung firmware, or three LEDs on the wrong pins.
+//
+// What buys that back is the lamp test at init(): every LED is lit for
+// INDICATOR_LAMP_TEST_MS at power-up, so each boot proves the pins, the LEDs
+// and the active level before the panel goes quiet. With the resting state
+// dark, that test is not a nicety any more -- it is the only evidence the panel
+// works at all, so do not shorten or remove it.
+//
 //                                        slot 0 is the RIGHTMOST bit
-#define INDICATOR_PAT_SYS_OK     0x0003u  // ..............XX  200 ms, then dark
+#define INDICATOR_PAT_OFF        0x0000u  // ................  dark: nothing to say
+#define INDICATOR_PAT_SYS_OK     INDICATOR_PAT_OFF
 #define INDICATOR_PAT_SYS_ERROR  0x5555u  // .X.X.X.X.X.X.X.X  100 ms strobe
-#define INDICATOR_PAT_ARM_SAFE   0x00FFu  // ........XXXXXXXX  800/800, calm
+#define INDICATOR_PAT_ARM_SAFE   INDICATOR_PAT_OFF
 #define INDICATOR_PAT_ARM_LIVE   0xFFFFu  // XXXXXXXXXXXXXXXX  solid: props live
 #define INDICATOR_PAT_GPS_SEARCH 0x0303u  // ......XX......XX  double blink
 #define INDICATOR_PAT_GPS_FIX    0xFFFFu  // XXXXXXXXXXXXXXXX  solid: has a fix

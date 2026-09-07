@@ -23,10 +23,15 @@
 // here rather than hardcoding a port inside the class.
 //
 // The third field is ACTIVE HIGH. Set it false for an LED wired to sink into
-// the pin (anode to 3V3), which is the common arrangement -- getting it wrong
-// does not break anything, it inverts every pattern, so "healthy" becomes a
-// near-solid light and "error" a near-dark one. Check it against the lamp test
-// at boot: all three LEDs should be ON for the first 0.7 s.
+// the pin (anode to 3V3), which is the common arrangement. Getting it wrong
+// does not break anything -- it inverts every pattern, which now means a
+// healthy, disarmed airframe lights the system and arm LEDs SOLID instead of
+// leaving them dark, and an armed one goes dark. Loud enough to spot, as long
+// as you know to look.
+//
+// Check it against the lamp test at boot: all three LEDs should be ON for the
+// first 0.7 s and the panel should then fall dark on a healthy board. If it is
+// dark first and lights afterwards, this field is wrong on all three.
 // ===========================================================================
 #ifndef LED_SYSTEM_Pin
 #warning "Indicator LEDs are on placeholder pins -- set them in Globals.cpp"
