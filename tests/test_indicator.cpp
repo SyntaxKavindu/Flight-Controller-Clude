@@ -103,8 +103,8 @@ int main()
         // Default states: ERROR / DISARMED / UNLOCKED.
         check(renderCycle(ind, t0, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_ERROR,
               "ERROR renders the 100 ms strobe");
-        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_SAFE,
-              "DISARMED renders the calm 800/800 blink");
+        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == INDICATOR_PAT_OFF,
+              "DISARMED is DARK -- no light means no live props");
         check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_SEARCH,
               "UNLOCKED renders the searching double blink");
     }
@@ -119,8 +119,8 @@ int main()
         ind.setSystemState(SystemState::OK);
         ind.setArmState(ArmState::ARMED);
         ind.setGPSState(GPSState::LOCKED);
-        check(renderCycle(ind, 2000, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_OK,
-              "OK renders one short blink per cycle");
+        check(renderCycle(ind, 2000, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_OFF,
+              "OK is DARK -- the system LED only ever means trouble");
         check(renderCycle(ind, 2000, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_LIVE,
               "ARMED is solid -- props live is never a dark LED");
         check(renderCycle(ind, 2000, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_FIX,
@@ -177,9 +177,9 @@ int main()
         ind.init();
         const uint32_t t0 = settle(ind, 0);
 
-        ind.setSystemState(SystemState::OK);
-        ind.setArmState(ArmState::ARMED);
-        ind.setGPSState(GPSState::LOCKED);
+        ind.setSystemState(SystemState::OK);      // dark
+        ind.setArmState(ArmState::ARMED);         // solid
+        ind.setGPSState(GPSState::UNLOCKED);      // the only channel with edges
         tickTo(ind, t0 + 1);
         stubGpioReset();
 
@@ -187,8 +187,9 @@ int main()
         for (uint32_t i = 0; i < 20u; i++) tickTo(ind, t0 + 2u + i);
         check(stubGpioWriteCount() == 0, "no writes while the rendered level holds");
 
-        // ... and a real edge still gets through. ARMED is solid, so use the
-        // OK channel, which goes dark at slot 2.
+        // ... and a real edge still gets through. Two states are now flat --
+        // OK is dark and ARMED is solid -- so the searching GPS pattern is what
+        // proves rendering did not simply stop. It goes dark at slot 2.
         tickTo(ind, t0 + 2u * INDICATOR_SLOT_MS + 50u);
         check(stubGpioWriteCount() > 0, "but a genuine edge is written");
     }
@@ -202,14 +203,25 @@ int main()
         g_stub_tick = 0;
         ind.init();
         settle(ind, 0);
-        g_stub_tick = 3000;
+
+        // A genuine transition, not a re-push. The constructor already starts
+        // at ERROR, so setting ERROR again is a no-op that leaves the phase
+        // where the lamp test put it -- and the slot landed on would then be
+        // whatever the clock happened to say. Go healthy first, so the failure
+        // below really does restart the cycle at slot 0.
+        g_stub_tick = 1000;
         ind.setSystemState(SystemState::OK);
-        ind.update();   // slot 0 of OK: lit
+        ind.update();
+        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "healthy: the system LED is dark");
+
+        g_stub_tick = 3000;
+        ind.setSystemState(SystemState::ERROR);
+        ind.update();   // slot 0 of the ERROR strobe: lit
 
         check(ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports lit");
         check(stubGpioLevel(GPIO_PIN_3) == GPIO_PIN_RESET,
               "... and an active-low LED is driven LOW to light it");
-        tickTo(ind, 3000 + 3u * INDICATOR_SLOT_MS);
+        tickTo(ind, 3000 + INDICATOR_SLOT_MS);   // slot 1 of the strobe: dark
         check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports dark");
         check(stubGpioLevel(GPIO_PIN_3) == GPIO_PIN_SET, "... and is driven HIGH");
     }
@@ -226,6 +238,35 @@ int main()
         const uint32_t base = 0xFFFFFF00u + INDICATOR_LAMP_TEST_MS;  // wraps
         check(renderCycle(ind, base, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_ERROR,
               "the pattern renders correctly straight through the wrap");
+    }
+
+    section("What the dark-resting scheme costs, and what still proves liveness");
+    {
+        // Two of the three channels now rest dark, so a healthy, disarmed
+        // airframe shows almost nothing. Pin what remains.
+        Indicator ind { SYS, ARM, GPS };
+        g_stub_tick = 0;
+        ind.init();
+        const uint32_t t0 = settle(ind, 0);
+
+        ind.setSystemState(SystemState::OK);
+        ind.setArmState(ArmState::DISARMED);
+        check(renderCycle(ind, t0, Indicator::CHANNEL_SYSTEM) == 0,
+              "healthy + disarmed: the system LED is dark for a whole cycle");
+        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == 0,
+              "... and so is the arm LED");
+
+        // ... but the GPS channel has NO dark state: searching blinks, locked
+        // is solid. So the panel is never completely unlit while the loop runs,
+        // and that LED is the de-facto liveness indicator now that the other
+        // two rest dark. Anything that makes a GPS state dark removes the last
+        // signal that separates "healthy" from "unpowered".
+        ind.setGPSState(GPSState::UNLOCKED);
+        check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) != 0,
+              "UNLOCKED still shows light -- the panel is not fully dark");
+        ind.setGPSState(GPSState::LOCKED);
+        check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_FIX,
+              "and LOCKED is solid, so neither GPS state is ever unlit");
     }
 
     return testReport("Indicator");
