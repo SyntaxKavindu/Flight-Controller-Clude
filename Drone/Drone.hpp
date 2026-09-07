@@ -140,10 +140,22 @@
 // the ungated version was spending.
 #define DRONE_POLL_MAX_SKIP            4096u
 
+// Status LED refresh. INDICATOR_SLOT_MS is 100 ms, so this is 5x oversampled:
+// enough that every pattern edge lands within 20 ms of where it belongs, which
+// is well under what an eye resolves. Higher buys nothing -- the work is three
+// compares and, on the rare pass that changes anything, one GPIO write.
+//
+// Deliberately its own gate in update() rather than a line in midLoop(). The
+// mid group stands down while a calibration runs and again whenever the
+// estimator is not ready, and those are precisely the two states an operator
+// most needs the panel to keep reporting.
+#define DRONE_INDICATOR_HZ               50
+
 #define DRONE_FAST_LOOP_PERIOD_MS        (1000u / DRONE_FAST_LOOP_HZ)
 #define DRONE_MID_LOOP_PERIOD_MS         (1000u / DRONE_MID_LOOP_HZ)
 #define DRONE_SLOW_LOOP_PERIOD_MS        (1000u / DRONE_SLOW_LOOP_HZ)
 #define DRONE_POLL_PERIOD_MS             (1000u / DRONE_POLL_HZ)
+#define DRONE_INDICATOR_PERIOD_MS        (1000u / DRONE_INDICATOR_HZ)
 
 static_assert(DRONE_FAST_LOOP_PERIOD_MS >= 1u,
 		"HAL_GetTick() is 1 ms: the fast group cannot be dispatched faster than 1 kHz");
@@ -225,6 +237,7 @@ private:
 	uint32_t _lastPollTick;
 	uint32_t _pollSkipped;      // passes since poll() last ran; see DRONE_POLL_MAX_SKIP
 	uint32_t _lastMidTick;
+	uint32_t _lastIndicatorTick;
 	uint32_t _lastSlowTick;
 	uint32_t _lastPublishTick;
 	float _lastReportedResetTime;   // so one estimator reset is reported once
@@ -270,6 +283,11 @@ private:
 	void fastLoop(void);
 	// Magnetometer and barometer fusion. DRONE_MID_LOOP_HZ.
 	void midLoop(void);
+
+	// Map what this class knows about the aircraft onto the status panel, then
+	// render it. Health only -- arming and GPS are pushed by whoever owns those
+	// subsystems, which is nothing in Drone yet. See the note on the body.
+	void updateIndicator(void);
 	// Heartbeat and housekeeping. DRONE_SLOW_LOOP_HZ.
 	void slowLoop(void);
 

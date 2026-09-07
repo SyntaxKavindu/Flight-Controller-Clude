@@ -117,6 +117,7 @@ void Drone::init(void) {
 	_lastPollTick = now;
 	_pollSkipped = 0;
 	_lastMidTick = now;
+	_lastIndicatorTick = now;
 	_lastSlowTick = now;
 	_lastPublishTick = now;
 	_lastReportedResetTime = ESEKF_NEVER_RESET;
@@ -193,6 +194,14 @@ void Drone::loop(void) {
 		const uint32_t t0 = HAL_GetTick();
 		telemetry.poll();
 		_pollMs += HAL_GetTick() - t0;
+	}
+
+	// The panel, on its own gate. Directly after poll() so a state a command
+	// just changed is rendered on the same pass, and ahead of the flight groups
+	// because it is the only output an operator has when telemetry is not
+	// connected -- it should not queue behind a slow sensor read.
+	if (due(now, _lastIndicatorTick, DRONE_INDICATOR_PERIOD_MS)) {
+		updateIndicator();
 	}
 
 	// The fast group is gated like the rest. It used to run unconditionally,
@@ -442,6 +451,47 @@ void Drone::reportEstimatorHealth(void) {
 	_noEstimateSlowLoops = 0;
 }
 
+// Health, as the panel sees it. Deliberately the SAME definition
+// reportEstimatorHealth() prints over telemetry -- two definitions of "is this
+// aircraft well" that can disagree is worse than either one alone, because the
+// operator then has to work out which to believe.
+//
+// ERROR means: a device did not come up, OR the filter is unrecoverable, OR it
+// has repaired a numerical fault, OR it has had no attitude for longer than the
+// telemetry warning allows.
+//
+// That last one is why this is not simply !isInitialized(). Seeding takes a
+// moment on every single boot, and a panel that screams ERROR for the first few
+// seconds of every power-up is a panel the operator learns to ignore -- which
+// costs nothing right up until the boot where the seed never lands. The grace
+// period is DRONE_NO_ESTIMATE_WARN_S, shared with the telemetry warning so the
+// LED and the "$ERR,NO ATTITUDE ESTIMATE" line change at the same moment.
+//
+// ARM and GPS are NOT set here. Drone owns neither Motors nor GPS, so it has
+// nothing truthful to say about them; the constructor leaves them at DISARMED
+// and UNLOCKED, which is the safe reading of "nobody has reported". When those
+// subsystems are wired in, one call each is all this needs:
+//
+//     indicator.setArmState(motors.isArmed() ? ArmState::ARMED
+//                                            : ArmState::DISARMED);
+//     indicator.setGPSState(gps.isFix() ? GPSState::LOCKED
+//                                       : GPSState::UNLOCKED);
+void Drone::updateIndicator(void) {
+	const bool device_failed = (_bootStatus != GLOBALS_INIT_OK);
+	const bool unrecoverable = _esekf.hasDiverged();
+	const bool repaired_fault = (_esekf.getFaultCount() != 0u);
+	const bool no_attitude = !_esekf.isInitialized()
+			&& (_noEstimateSlowLoops >= DRONE_NO_ESTIMATE_WARN_S);
+
+	indicator.setSystemState(
+			(device_failed || unrecoverable || repaired_fault || no_attitude)
+					? SystemState::ERROR : SystemState::OK);
+
+	// Rendering is separate from deciding, and unconditional: the pattern has
+	// to keep advancing even on the passes where nothing about the state moved.
+	indicator.update();
+}
+
 void Drone::seedEstimator(bool imu_ok, const IMU_Data &imu_data) {
 	// initialize() levels the airframe from the accelerometer and takes its
 	// heading from the magnetometer, so both are required -- seeding attitude
@@ -646,6 +696,19 @@ void Drone::reportDiagnostics(void) {
 	// every sample-count gate in AccelerometerCalibrator and LevelCalibrator is
 	// then running at a fraction of its documented time -- which shows up as a
 	// tumble that reports STALLED partway through a good run.
+	// The status panel, as the operator should be seeing it. Worth reporting
+	// because the LEDs are the one output that cannot be read back over the
+	// link: a dark panel is either "healthy, mid-pattern" or "wrong pin", and
+	// this line is what tells the two apart without a multimeter.
+	telemetry.send("$DIAG,LED sys=%s arm=%s gps=%s lit=%u%u%u test=%u",
+			indicator.getSystemState() == SystemState::OK ? "OK" : "ERR",
+			indicator.getArmState() == ArmState::ARMED ? "ARMED" : "SAFE",
+			indicator.getGPSState() == GPSState::LOCKED ? "FIX" : "SEARCH",
+			(unsigned) (indicator.isLit(Indicator::CHANNEL_SYSTEM) ? 1 : 0),
+			(unsigned) (indicator.isLit(Indicator::CHANNEL_ARM) ? 1 : 0),
+			(unsigned) (indicator.isLit(Indicator::CHANNEL_GPS) ? 1 : 0),
+			(unsigned) (indicator.inLampTest() ? 1 : 0));
+
 	telemetry.send("$DIAG,CALFEED div=%u hz=%u",
 			(unsigned) calibrator.getAccelFeedDivider(),
 			(unsigned) (DRONE_FAST_LOOP_HZ / (calibrator.getAccelFeedDivider() ?

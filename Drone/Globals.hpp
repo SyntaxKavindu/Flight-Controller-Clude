@@ -15,6 +15,7 @@
  *     Imu           imu           -- Imu.hpp
  *     Magnetometer  magnetometer  -- Magnetometer.hpp
  *     Barometer     barometer     -- Barometer.hpp
+ *     Indicator     indicator     -- Indicator.hpp
  *
  * They are all *defined* in Globals.cpp. Keeping the definitions in one
  * translation unit is what makes their construction order defined: across
@@ -34,6 +35,7 @@
 #include "Calibrator.hpp"
 #include "EEPROM.hpp"
 #include "Imu.hpp"
+#include "Indicator.hpp"
 #include "Magnetometer.hpp"
 #include "Telemetry.hpp"
 

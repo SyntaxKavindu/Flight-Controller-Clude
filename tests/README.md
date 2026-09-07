@@ -12,6 +12,7 @@ cd tests && make
 | `make esekf` | Alignment, propagation, every fusion path, integrity flags, fault recovery, setter validation |
 | `make cal`   | The three calibration engines, driven directly |
 | `make integ` | The `Calibrator` facade, the sensor frontends, the EEPROM record |
+| `make indicator` | The status panel: pattern rendering, lamp test, phase handling, GPIO write suppression |
 | `make firmware` | Links the whole stack including `Drone.cpp` and runs `loop()` |
 
 `make cal` links **only** `AccelerometerCalibrator`, `CompassCalibrator` and
@@ -29,7 +30,8 @@ particular.
 
 They do **not** cover timing, SPI/I2C behaviour, USB throughput, sensor noise,
 vibration, or anything about the real parts. `stub/` always succeeds and its
-clock never advances; a fake ICM-42688-P would only test the fake. Those belong
+clock only advances where a test moves `g_stub_tick` by hand (the indicator
+suite is the only one that does); a fake ICM-42688-P would only test the fake. Those belong
 on the bench.
 
 ## Conventions the tests assume

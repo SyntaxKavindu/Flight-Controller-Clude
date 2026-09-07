@@ -16,6 +16,7 @@ static GPIO_TypeDef g_port;
 GPIO_TypeDef *const SPI1_CS_GPIO_Port = &g_port;
 GPIO_TypeDef *const SPI2_CS_GPIO_Port = &g_port;
 GPIO_TypeDef *const SPI3_CS_GPIO_Port = &g_port;
+GPIO_TypeDef *const GPIOE = &g_port;
 SPI_HandleTypeDef hspi1, hspi2, hspi3;
 I2C_HandleTypeDef hi2c1, hi2c3;
 
@@ -25,10 +26,30 @@ bool g_stub_echo_telemetry = false;
 
 extern "C" {
 uint32_t SystemCoreClock = 216000000u;
-uint32_t HAL_GetTick(void) { return 0; }
+uint32_t g_stub_tick = 0u;
+uint32_t HAL_GetTick(void) { return g_stub_tick; }
 HAL_TickFreqTypeDef HAL_GetTickFreq(void) { return HAL_TICK_FREQ_1KHZ; }
 void HAL_Delay(uint32_t) {}
-void HAL_GPIO_WritePin(GPIO_TypeDef*, uint16_t, GPIO_PinState) {}
+// Recorded rather than swallowed, so a test can assert both WHAT was driven
+// and HOW OFTEN. Keyed by pin alone: every stub port is the same object, and
+// the pins the tests care about are distinct.
+static GPIO_PinState g_pin_level[16];
+static uint32_t g_gpio_writes = 0u;
+static inline uint8_t pinSlot(uint16_t pin) {
+	uint8_t n = 0;
+	while (n < 15u && (pin >> n) != 1u) n++;   // GPIO_PIN_n is 1 << n
+	return n;
+}
+void HAL_GPIO_WritePin(GPIO_TypeDef*, uint16_t pin, GPIO_PinState state) {
+	g_gpio_writes++;
+	g_pin_level[pinSlot(pin)] = state;
+}
+GPIO_PinState stubGpioLevel(uint16_t pin) { return g_pin_level[pinSlot(pin)]; }
+uint32_t stubGpioWriteCount(void) { return g_gpio_writes; }
+void stubGpioReset(void) {
+	g_gpio_writes = 0u;
+	for (unsigned i = 0; i < 16u; i++) g_pin_level[i] = GPIO_PIN_RESET;
+}
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef*, uint8_t*, uint16_t, uint32_t) { return HAL_OK; }
 HAL_StatusTypeDef HAL_SPI_TransmitReceive(SPI_HandleTypeDef*, uint8_t*, uint8_t*, uint16_t, uint32_t) { return HAL_OK; }
 HAL_StatusTypeDef HAL_I2C_IsDeviceReady(I2C_HandleTypeDef*, uint16_t, uint32_t, uint32_t) { return HAL_OK; }
