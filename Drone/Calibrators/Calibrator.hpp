@@ -39,6 +39,34 @@ enum class Calibrator_StatusTypeDef{
 // control loop, so reporting every sample would swamp the serial link.
 #define CALIBRATOR_PROGRESS_INTERVAL          50
 
+// Rate at which the accelerometer procedures WANT to be fed, in Hz.
+//
+// Every rate-sensitive constant in AccelerometerCalibrator -- the stillness
+// window, the samples-per-position count, both stall limits -- was chosen and
+// characterised against a 200 Hz feed, and its header states the resulting
+// times in seconds on that basis. Nothing in that class measures time, so
+// feeding it faster silently rescales all four:
+//
+//                      at 200 Hz (intended)   at 1 kHz (this fast loop)
+//   stillness window          60 ms             12 ms  <- admits motion
+//   samples/position         500 ms            100 ms  <- less averaging
+//   six-position stall         50 s              10 s
+//   tumble stall              200 s              41 s  <- aborts a good run
+//
+// The last one is not theoretical: the longest no-progress gap measured in a
+// SUCCESSFUL tumble was 10151 samples (see ACCEL_CAL_TUMBLE_STALL_LIMIT), and
+// that same operator pause at 1 kHz is ~50000 samples -- past the 40000 limit.
+//
+// So the feed is decimated back to this rate rather than the constants being
+// rescaled. Decimation, not averaging: dropping N-1 of every N samples leaves
+// the noise statistics exactly as they were characterised, where a box average
+// would shrink them by sqrt(N) and quietly loosen the stillness gate by the
+// same factor. It also costs nothing -- no accumulator, no extra state per
+// axis -- which rescaling the stillness window would not (it is an array).
+//
+// The compass path needs none of this: it is fed from the 50 Hz mid loop.
+#define CALIBRATOR_ACCEL_FEED_HZ              200u
+
 // ONE sample buffer, shared by the accelerometer tumble and the compass sweep.
 //
 // Both procedures collect into a caller-supplied buffer (see
@@ -162,6 +190,19 @@ public:
 	// yaw_offset_deg: mounting rotation about the vertical, which gravity
 	// cannot observe. See LevelCalibrator::begin().
 	void startLevelCalibration(float yaw_offset_deg = 0.0f);
+
+	// Rate, in Hz, at which calibrateAccelerometer() and calibrateLevel() will
+	// be called -- the caller's control-loop rate, not the sensor's ODR. Sets up
+	// the decimation described at CALIBRATOR_ACCEL_FEED_HZ.
+	//
+	// Optional. Left unset, every sample is passed through, which is correct
+	// for a caller already running at CALIBRATOR_ACCEL_FEED_HZ or slower.
+	// Ignored while a procedure is running: changing the divider mid-run would
+	// rescale the gates the run has already been judged against.
+	void setAccelFeedRate(uint16_t loop_hz);
+
+	// Divider currently in force. 1 means every sample is used.
+	uint16_t getAccelFeedDivider() const { return _feedDivider; }
 
 	// Feed the RAW (axis-remapped, uncorrected) accelerometer sample, exactly as
 	// calibrateAccelerometer() takes it. The accelerometer correction is applied
@@ -292,6 +333,12 @@ private:
 	bool _awaitingPosition;
 	uint16_t _progressThrottle;
 
+	// Feed decimation for the two accelerometer-path entry points. _feedPhase
+	// counts calls and one in every _feedDivider is passed on. Reset at the
+	// start of each procedure so a run always begins on an accepted sample.
+	uint16_t _feedDivider;
+	uint16_t _feedPhase;
+
 	// See getCalibrationEpoch().
 	uint32_t _calibrationEpoch;
 
@@ -311,6 +358,9 @@ private:
 	// Rotation from measured board axes to airframe axes; identity until a
 	// levelling calibration succeeds.
 	Matrix3f    _boardRotation;
+
+	// True once per _feedDivider calls. See CALIBRATOR_ACCEL_FEED_HZ.
+	bool acceptFeedSample();
 
 	// Pull the finished gains out of a calibrator into the affine form above.
 	void adoptAccelResult();

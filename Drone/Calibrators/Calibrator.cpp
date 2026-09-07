@@ -44,7 +44,8 @@ Calibrator::Calibrator() :
 				_isLevelCalibrating { false }, _isAccelCalibrated { false },
 				_isCompassCalibrated { false }, _isLevelCalibrated { false },
 				_lastSaveFailed { false }, _awaitingPosition { false },
-				_progressThrottle { 0 }, _calibrationEpoch { 0 },
+				_progressThrottle { 0 }, _feedDivider { 1 }, _feedPhase { 0 },
+				_calibrationEpoch { 0 },
 				_accelMisalignDeg { -1.0f },
 				_accelOffset { }, _accelMatrix { Matrix3f::identity() },
 				_compassOffset { }, _compassMatrix { Matrix3f::identity() },
@@ -121,6 +122,10 @@ bool Calibrator::beginProcedure(const char *stage) {
 	}
 	_awaitingPosition = false;
 	_progressThrottle = 0;
+	// A run always starts on an accepted sample, whatever the phase happened to
+	// be left at -- otherwise the first up to _feedDivider-1 samples after the
+	// operator sends READY are silently dropped.
+	_feedPhase = 0;
 	_lastSaveFailed = false;
 	return true;
 }
@@ -217,6 +222,14 @@ void Calibrator::calibrateLevel(Vector3f &acclData) {
 		return;
 	}
 
+	// Same decimation as the accelerometer path: LEVEL_CAL_SAMPLES and
+	// LEVEL_CAL_STALL_LIMIT are sample counts too, so an undecimated 1 kHz feed
+	// would average this fit over 200 ms instead of a second and abort a slow
+	// settle after 10 s instead of 50. See CALIBRATOR_ACCEL_FEED_HZ.
+	if (!acceptFeedSample()) {
+		return;
+	}
+
 	// Corrected here rather than by the caller so the ordering cannot be got
 	// wrong: the levelling fit is only meaningful on top of a finished
 	// accelerometer calibration, which startLevelCalibration() has checked for.
@@ -259,6 +272,41 @@ void Calibrator::finishLevelCalibration() {
 	telemetry.send("$CAL,LEVEL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 }
 
+// See CALIBRATOR_ACCEL_FEED_HZ for why this exists at all.
+void Calibrator::setAccelFeedRate(uint16_t loop_hz) {
+	// Mid-run the gates have already been applied to samples selected under the
+	// old divider; changing it now would judge the rest of the run against a
+	// different stillness window and a different stall timeout than the part
+	// already collected.
+	if (isCalibrating()) {
+		return;
+	}
+	if (loop_hz <= CALIBRATOR_ACCEL_FEED_HZ) {
+		_feedDivider = 1; // already at or below the target rate
+	} else {
+		// Round to nearest, so 1000 Hz -> 5 (200.0 Hz) and 981 Hz -> 5
+		// (196.2 Hz) rather than both truncating to a rate that is still high.
+		_feedDivider = (uint16_t) ((loop_hz + CALIBRATOR_ACCEL_FEED_HZ / 2u)
+				/ CALIBRATOR_ACCEL_FEED_HZ);
+		if (_feedDivider == 0) {
+			_feedDivider = 1; // unreachable given the branch above; cheap guard
+		}
+	}
+	_feedPhase = 0;
+}
+
+bool Calibrator::acceptFeedSample() {
+	if (_feedDivider <= 1) {
+		return true;
+	}
+	// Phase 0 is the accepted one, so the first sample of a run is always used.
+	const bool accept = (_feedPhase == 0);
+	if (++_feedPhase >= _feedDivider) {
+		_feedPhase = 0;
+	}
+	return accept;
+}
+
 void Calibrator::calibrateAccelerometer(Vector3f &acclData) {
 	if (!_isAccelCalibrating) {
 		return;
@@ -267,6 +315,14 @@ void Calibrator::calibrateAccelerometer(Vector3f &acclData) {
 	// Between orientations the airframe is being moved, so anything arriving
 	// now is motion, not a measurement. Wait for the user to confirm.
 	if (_awaitingPosition) {
+		return;
+	}
+
+	// Decimate to CALIBRATOR_ACCEL_FEED_HZ. Counted only while a position is
+	// actually being recorded, so the phase is not advanced by the samples
+	// discarded above -- otherwise which sample of each burst gets through
+	// would depend on how long the operator took to send READY.
+	if (!acceptFeedSample()) {
 		return;
 	}
 
