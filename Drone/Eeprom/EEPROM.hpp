@@ -16,19 +16,33 @@
 // the device. Every access is bounds-checked against this.
 #define EEPROM_DEVICE_SIZE 256u
 
-// M24C02 is 256 bytes. Slots are spaced 64 bytes apart for the three sensor
-// calibration blobs because a full correction record (magic + version + 3-vector
-// offset + 3x3 matrix + CRC) is 56 bytes -- the previous 32-byte spacing could
-// not hold one, so ACCLCALIBRATEDAT would have run into GYROCALIBRATEDAT.
-// Nothing persisted anything at the old offsets, so there is no stored data to
-// migrate.
+// M24C02 is 256 bytes, and a full correction record (magic + version +
+// 3-vector offset + 3x3 matrix + CRC) is 56 bytes, so every slot that holds one
+// must be at least 64. Three of them plus two 32-byte config slots is exactly
+// 256 -- the device is full, and there is no room for a fourth calibration
+// record without shrinking something else or fitting a larger part.
+//
+// BOARDLEVELCALIBRATEDAT was previously squeezed into 0xF0..0xFF, sixteen
+// bytes, to hold a 56-byte record. It could never be written: fits() refused
+// every attempt and the levelling calibration reported NOTSAVED on every run
+// while working perfectly in RAM. slotCapacity() did not list it at all either,
+// so its capacity came back as 0 -- the write was doubly impossible -- and the
+// two disagreed about USER_SETTINGS, which slotCapacity() believed ran to 0xFF
+// straight through the level slot.
+//
+// It now occupies 0x80, the 64-byte slot that GYROCALIBRATEDAT reserved and
+// nothing ever used: there is no gyro calibration anywhere in this codebase.
+// That enum entry is removed rather than left pointing at the same address,
+// because an alias for a slot that now means something else is a trap.
+//
+// ACCL and COMPASS keep their addresses, so a calibration already stored at
+// 0x00 or 0x40 survives this change. Nothing was ever stored at 0x80 or 0xF0.
 enum class EEPROMLocation : uint8_t {
-    ACCLCALIBRATEDAT       = 0x00, // 0x00..0x3F  64   unchanged
-    COMPASSCALIBRATEDAT    = 0x40, // 0x40..0x7F  64   unchanged
-    GYROCALIBRATEDAT       = 0x80, // 0x80..0xBF  64   unchanged
-    SYSTEM_CONFIG          = 0xC0, // 0xC0..0xDF  32   unchanged
-    USER_SETTINGS          = 0xE0, // 0xE0..0xEF  16   was 32, now 16
-    BOARDLEVELCALIBRATEDAT = 0xF0  // 0xF0..0xFF  16   new
+    ACCLCALIBRATEDAT       = 0x00, // 0x00..0x3F  64  holds a CalibrationRecord
+    COMPASSCALIBRATEDAT    = 0x40, // 0x40..0x7F  64  holds a CalibrationRecord
+    BOARDLEVELCALIBRATEDAT = 0x80, // 0x80..0xBF  64  holds a CalibrationRecord
+    SYSTEM_CONFIG          = 0xC0, // 0xC0..0xDF  32
+    USER_SETTINGS          = 0xE0  // 0xE0..0xFF  32
 };
 
 class EEPROM {
@@ -73,6 +87,21 @@ public:
     EEPROM_StatusTypeDef read(EEPROMLocation location, T &data) {
         return read(location, &data);
     }
+    // constexpr, and public, so a caller that knows what it is storing can
+    // assert at COMPILE TIME that the slot is big enough -- see the checks at
+    // the top of Calibrator.cpp. A slot missing from this switch returns 0 and
+    // fits() then refuses every write to it, which is safe but silent: that is
+    // exactly how the levelling record came to fail on every save with nothing
+    // but a NOTSAVED to show for it.
+    static constexpr size_t slotCapacity(EEPROMLocation location) {
+        return (location == EEPROMLocation::ACCLCALIBRATEDAT)       ? 0x40  // 0x00..0x3F
+             : (location == EEPROMLocation::COMPASSCALIBRATEDAT)    ? 0x40  // 0x40..0x7F
+             : (location == EEPROMLocation::BOARDLEVELCALIBRATEDAT) ? 0x40  // 0x80..0xBF
+             : (location == EEPROMLocation::SYSTEM_CONFIG)          ? 0x20  // 0xC0..0xDF
+             : (location == EEPROMLocation::USER_SETTINGS)          ? 0x20  // 0xE0..0xFF
+             : 0u;
+    }
+
 private:
     // Bytes available to a slot before the next one starts, or before the end
     // of the device for the last slot.
@@ -84,17 +113,6 @@ private:
     // because M24C02 addresses the part with a uint8_t, wraps to 0x17 and
     // corrupts the middle of the accelerometer calibration at 0x00. Both
     // report success.
-    static size_t slotCapacity(EEPROMLocation location) {
-        switch (location) {
-        case EEPROMLocation::ACCLCALIBRATEDAT:    return 0x40; // 0x00..0x3F
-        case EEPROMLocation::COMPASSCALIBRATEDAT: return 0x40; // 0x40..0x7F
-        case EEPROMLocation::GYROCALIBRATEDAT:    return 0x40; // 0x80..0xBF
-        case EEPROMLocation::SYSTEM_CONFIG:       return 0x20; // 0xC0..0xDF
-        case EEPROMLocation::USER_SETTINGS:       return 0x20; // 0xE0..0xFF
-        default:                                  return 0;
-        }
-    }
-
     // True when `len` bytes starting at `location` stay inside that slot, and
     // therefore inside the device.
     static bool fits(EEPROMLocation location, size_t len) {

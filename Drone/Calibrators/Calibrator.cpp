@@ -13,6 +13,25 @@
 #include <cstring> // memset, memcmp
 #include <cmath>   // std::isfinite
 
+// A slot too small for the record it holds cannot be written, and the only
+// symptom is a NOTSAVED on every single calibration -- the gains work all
+// session and silently vanish on reboot. That is what BOARDLEVELCALIBRATEDAT
+// did for its whole existence, wedged into sixteen bytes for a fifty-six byte
+// record. These turn that into a build error.
+//
+// Here rather than in EEPROM.hpp because only this file knows both halves:
+// EEPROM.hpp owns the layout and has never heard of CalibrationRecord, and
+// Calibrator.hpp deliberately forward-declares EEPROM to keep the HAL out.
+static_assert(EEPROM::slotCapacity(EEPROMLocation::ACCLCALIBRATEDAT)
+		>= sizeof(CalibrationRecord),
+		"accelerometer EEPROM slot is too small for a CalibrationRecord");
+static_assert(EEPROM::slotCapacity(EEPROMLocation::COMPASSCALIBRATEDAT)
+		>= sizeof(CalibrationRecord),
+		"compass EEPROM slot is too small for a CalibrationRecord");
+static_assert(EEPROM::slotCapacity(EEPROMLocation::BOARDLEVELCALIBRATEDAT)
+		>= sizeof(CalibrationRecord),
+		"board-level EEPROM slot is too small for a CalibrationRecord");
+
 // Member order here follows the declaration order in the header -- the compiler
 // initialises in declaration order regardless of what is written, so a list in
 // a different order reads as a lie about what happens. _levelCalibrator was
