@@ -301,6 +301,13 @@ void Calibrator::finishAccelCalibration() {
 	_isAccelCalibrating = false;
 	_awaitingPosition = false;
 
+	// Tumble only -- six-position fits no ellipsoid and has no residual.
+	if (_accelerometerCalibrator.getMode() == AccelCalMode::TUMBLE) {
+		telemetry.send("$ACCLFIT,res=%.3f,max=%.2f",
+				(double) _accelerometerCalibrator.getLastFitResidual(),
+				(double) ACCEL_CAL_MAX_FIT_RESIDUAL);
+	}
+
 	if (status != AccelCalStatus::SUCCESS) {
 		telemetry.send("$CAL,ACCL,FAIL,%d", (int) status);
 		return;
@@ -397,6 +404,20 @@ void Calibrator::finishCompassCalibration() {
 		_lastSaveFailed = (saveCompassCalibrationData() != Calibrator_StatusTypeDef::OK);
 	}
 	_isCompassCalibrating = false;
+
+	// Emitted whether the fit passed or failed. On a failure the status code
+	// alone says which gate rejected it but not by how much, and for
+	// FAILED_POOR_FIT that is the whole question: a residual of 0.16 is a sweep
+	// that nearly worked, 0.90 is an environment or a sensor carrying no usable
+	// field, and they call for completely different responses. On a success the
+	// same numbers are a quality score -- a residual near the limit means the
+	// calibration was accepted but is not one to trust far.
+	telemetry.send("$MAGFIT,res=%.3f,max=%.2f,n=%u,bins=%u,scatter=%.2f",
+			(double) _compassCalibrator.getLastFitResidual(),
+			(double) COMPASS_CAL_MAX_FIT_RESIDUAL,
+			(unsigned) _compassCalibrator.getSampleCount(),
+			(unsigned) _compassCalibrator.getFilledBinsCount(),
+			(double) _compassCalibrator.getScatterRatio());
 
 	if (status != CalStatus::SUCCESS) {
 		telemetry.send("$CAL,MAG,FAIL,%d", (int) status);

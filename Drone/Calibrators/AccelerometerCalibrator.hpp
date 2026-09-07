@@ -193,6 +193,12 @@ public:
     AccelCalStatus getStatus() const { return _status; }
     AccelCalMode getMode() const { return _mode; }
 
+    // RMS deviation of the corrected tumble samples from 1 g, as a fraction of
+    // it, from the last calibrate(). -1 until one has run, and always -1 for
+    // the six-position mode, which has no ellipsoid to fit. See
+    // CompassCalibrator::getLastFitResidual() for why a rejection needs this.
+    float getLastFitResidual() const { return _last_residual; }
+
     Vector3f correct(const Vector3f &raw) const;
     Vector3f getBias() const;
     // Sample-unit magnitude of 1 g the tumble fit was normalised against.
@@ -244,6 +250,7 @@ private:
     float _stillness_threshold_sq;
     Vector3f _offset_tumble;
     Matrix3f _matrix_tumble;
+    float _last_residual; // see getLastFitResidual()
 
     AccelSampleResult addSampleTumble(const Vector3f &s);
     AccelCalStatus calibrateTumble();
