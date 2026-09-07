@@ -124,6 +124,13 @@ void Drone::init(void) {
 	_lastReportedEkfFaults = _esekf.getFaultCount();
 	_noEstimateSlowLoops = 0;
 
+	// The accelerometer and levelling procedures are driven from fastLoop(), so
+	// this is the rate their sample-count gates would otherwise be judged
+	// against -- five times what they were characterised for. Tell the facade
+	// the rate and it decimates; see CALIBRATOR_ACCEL_FEED_HZ. Nothing needs to
+	// be said about the compass, which is fed from the 50 Hz mid group.
+	calibrator.setAccelFeedRate(DRONE_FAST_LOOP_HZ);
+
 	// Baseline: seeding is about to happen against exactly these gains, so only
 	// a LATER change has to force a re-seed.
 	_calibrationEpoch = calibrator.getCalibrationEpoch();
@@ -633,6 +640,16 @@ void Drone::reportDiagnostics(void) {
 #endif
 	telemetry.send("$DIAG,BUILD fpu=%s opt=%s ic=%d dc=%d",
 			build_fpu, build_opt, build_ic, build_dc);
+
+	// Accelerometer/levelling feed decimation. div=1 with a fast loop well above
+	// CALIBRATOR_ACCEL_FEED_HZ means setAccelFeedRate() was never called, and
+	// every sample-count gate in AccelerometerCalibrator and LevelCalibrator is
+	// then running at a fraction of its documented time -- which shows up as a
+	// tumble that reports STALLED partway through a good run.
+	telemetry.send("$DIAG,CALFEED div=%u hz=%u",
+			(unsigned) calibrator.getAccelFeedDivider(),
+			(unsigned) (DRONE_FAST_LOOP_HZ / (calibrator.getAccelFeedDivider() ?
+					calibrator.getAccelFeedDivider() : 1u)));
 
 	// Where the loop's time actually goes, as a share of uptime. Summed from
 	// HAL_GetTick() deltas: one sample quantises to 0 or 1 ms, but over

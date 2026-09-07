@@ -10,13 +10,16 @@ using namespace phys;
 
 // Drive one accelerometer calibration to completion through the facade, so the
 // board-frame and level tests have the prerequisite they need.
-static void runSixPosition(const Vector3f &scale, const Vector3f &bias)
+// calls_per_position is CALLS, not accepted samples: with the feed decimated
+// (see CALIBRATOR_ACCEL_FEED_HZ) a position needs the divider times as many.
+static void runSixPosition(const Vector3f &scale, const Vector3f &bias,
+                           int calls_per_position = 120)
 {
     calibrator.startAccelerometerCalibration();
     const Vector3f truth[6] = {{G,0,0},{-G,0,0},{0,G,0},{0,-G,0},{0,0,G},{0,0,-G}};
     for (int p = 0; p < 6 && calibrator.isAcclCalibrating(); p++) {
         calibrator.confirmReady();
-        for (int i = 0; i < 120 && calibrator.isAcclCalibrating(); i++) {
+        for (int i = 0; i < calls_per_position && calibrator.isAcclCalibrating(); i++) {
             Vector3f s(scale.x * truth[p].x + bias.x,
                        scale.y * truth[p].y + bias.y,
                        scale.z * truth[p].z + bias.z);
@@ -196,6 +199,118 @@ int main()
         Calibrator::packRecord(o, mm, rec, 900.0f);
         Calibrator::unpackRecord(rec, off, m, &got);
         check(got > 25.0f, "an absurd misalignment saturates high, it does not wrap");
+    }
+
+    section("Accelerometer feed decimation");
+    {
+        // Every sample-count gate in AccelerometerCalibrator and LevelCalibrator
+        // was characterised against a 200 Hz feed, and neither class measures
+        // time. Driven from a 1 kHz control loop they all run 5x short -- most
+        // damagingly the tumble stall limit, which then aborts a run that a
+        // real operator is completing normally. See CALIBRATOR_ACCEL_FEED_HZ.
+        calibrator.init(nullptr);
+        check(calibrator.getAccelFeedDivider() == 1,
+              "undecimated by default, so an existing 200 Hz caller is unaffected");
+
+        calibrator.setAccelFeedRate(1000);
+        check(calibrator.getAccelFeedDivider() == 5, "1 kHz feed decimates by 5");
+        calibrator.setAccelFeedRate(981);   // the rate this airframe measures
+        check(calibrator.getAccelFeedDivider() == 5, "981 Hz rounds to 5, not 4");
+        calibrator.setAccelFeedRate(500);
+        check(calibrator.getAccelFeedDivider() == 3, "500 Hz rounds to nearest (166 Hz)");
+        calibrator.setAccelFeedRate(200);
+        check(calibrator.getAccelFeedDivider() == 1, "a caller already at 200 Hz is left alone");
+        calibrator.setAccelFeedRate(50);
+        check(calibrator.getAccelFeedDivider() == 1, "a slower caller is never upsampled");
+        calibrator.setAccelFeedRate(0);
+        check(calibrator.getAccelFeedDivider() == 1, "zero does not divide by zero");
+    }
+    {
+        // Changing the divider mid-run would judge the rest of a procedure
+        // against a different stillness window and stall timeout than the part
+        // already collected.
+        calibrator.init(nullptr);
+        calibrator.setAccelFeedRate(1000);
+        calibrator.startCompassCalibration();
+        calibrator.setAccelFeedRate(200);
+        check(calibrator.getAccelFeedDivider() == 5, "the divider is frozen while a run is live");
+        calibrator.cancelCalibration();
+        calibrator.setAccelFeedRate(200);
+        check(calibrator.getAccelFeedDivider() == 1, "... and settable again once idle");
+    }
+    {
+        // The behavioural proof: with a divider of 5 a position needs 5x the
+        // calls, and lands on exactly 5x -- which is only true if the phase is
+        // reset at the start of the run rather than left wherever it was.
+        calibrator.init(nullptr);
+        calibrator.setAccelFeedRate(1000);
+        calibrator.startAccelerometerCalibration();
+        calibrator.confirmReady();
+        // Phase 0 is the accepted one, so accepted-count after N calls is
+        // ceil(N/5) and the 100th lands on call 5*99+1 = 496. Landing exactly
+        // there is what proves the phase was reset at the start of the run:
+        // left wherever the previous procedure abandoned it, the first accepted
+        // sample would slip by up to four calls.
+        for (int i = 0; i < 495; i++) { Vector3f s(G, 0, 0); calibrator.calibrateAccelerometer(s); }
+        check(!calibrator.isAwaitingPosition(),
+              "495 calls at div=5 is one accepted sample short of the position");
+        Vector3f s(G, 0, 0);
+        calibrator.calibrateAccelerometer(s);
+        check(calibrator.isAwaitingPosition(),
+              "the 496th call completes it -- 100 accepted samples, exactly 5x");
+        calibrator.cancelCalibration();
+    }
+    {
+        // Decimation must not change the ANSWER, only the rate: same sensor,
+        // same fit, whether or not samples are being dropped on the way in.
+        const Vector3f scale(1.03f, 0.98f, 1.01f), bias(0.2f, -0.15f, 0.1f);
+        Vector3f probe(bias.x, bias.y, scale.z * -G + bias.z);
+
+        calibrator.init(nullptr);
+        check(calibrator.getAccelFeedDivider() == 5,
+              "init() leaves the divider alone -- it is caller wiring, not calibration state");
+        calibrator.setAccelFeedRate(200);               // div = 1
+        runSixPosition(scale, bias);
+        Vector3f undecimated = probe;
+        calibrator.correctAcclData(undecimated);
+
+        calibrator.init(nullptr);
+        calibrator.setAccelFeedRate(1000);              // div = 5
+        runSixPosition(scale, bias, 600);
+        check(calibrator.isAcclCalibrated(), "six-position still completes when decimated");
+        Vector3f decimated = probe;
+        calibrator.correctAcclData(decimated);
+
+        checkNear(decimated.x, undecimated.x, 1e-5f, "decimation leaves the X gain identical");
+        checkNear(decimated.y, undecimated.y, 1e-5f, "... and Y");
+        checkNear(decimated.z, undecimated.z, 1e-5f, "... and Z");
+    }
+    {
+        // The levelling fit is on the same feed and has the same kind of gate,
+        // so it is decimated too -- LEVEL_CAL_SAMPLES is a count, not a time.
+        calibrator.init(nullptr);
+        calibrator.setAccelFeedRate(1000);
+        runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0), 600);
+
+        const float a = 3.0f * D2R, c = std::cos(a), sn = std::sin(a);
+        const Vector3f level(0.0f, 0.0f, -G);
+        const Vector3f measured(level.x, c*level.y - sn*level.z, sn*level.y + c*level.z);
+
+        calibrator.startLevelCalibration();
+        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; calibrator.calibrateLevel(v);
+        }
+        check(!calibrator.isLevelCalibrated(),
+              "400 calls at div=5 is short of LEVEL_CAL_SAMPLES -- the gate really is decimated");
+        for (int i = 0; i < 1200 && calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; calibrator.calibrateLevel(v);
+        }
+        check(calibrator.isLevelCalibrated(), "... and completes once enough samples arrive");
+
+        Vector3f corrected = measured;
+        calibrator.correctBoardFrame(corrected);
+        const float err = std::acos(std::fmin(1.0f, corrected.dot(level) / (corrected.length()*G))) * R2D;
+        checkNear(err, 0.0f, 0.02f, "the decimated levelling fit is just as accurate");
     }
 
     return testReport("Integration");
