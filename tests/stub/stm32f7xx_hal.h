@@ -49,7 +49,10 @@ typedef struct { uint32_t Instance; uint32_t Init; } TIM_HandleTypeDef;
 #define __HAL_TIM_SET_PRESCALER(h, v)    ((void)0)
 #define __HAL_TIM_SET_COMPARE(h, c, v)   ((void)0)
 
+typedef enum { HAL_TICK_FREQ_1KHZ = 1u } HAL_TickFreqTypeDef;
+extern uint32_t SystemCoreClock;
 uint32_t HAL_GetTick(void);
+HAL_TickFreqTypeDef HAL_GetTickFreq(void);
 void     HAL_Delay(uint32_t ms);
 void     HAL_GPIO_WritePin(GPIO_TypeDef *port, uint16_t pin, GPIO_PinState state);
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef *h, uint8_t *d, uint16_t s, uint32_t t);
