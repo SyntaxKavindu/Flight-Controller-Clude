@@ -578,6 +578,47 @@ void Drone::reportDiagnostics(void) {
 			(unsigned long) SystemCoreClock,
 			(unsigned long) (1000u / (HAL_GetTickFreq() ? HAL_GetTickFreq() : 1u)));
 
+	// How this binary was BUILT, which is the difference between the estimator
+	// costing 150 us and costing 2.5 ms. None of it is visible from any other
+	// output, and all of it is a project setting rather than a code defect:
+	//
+	//   fpu=SOFT   every float operation is a library call. On a part with an
+	//              FPU this is 10-50x. Fix: -mfloat-abi=hard -mfpu=fpv5-sp-d16.
+	//   opt=OFF    built at -O0, which is CubeIDE's Debug default. Float-heavy
+	//              code spills every intermediate to the stack; 5-15x. Fix:
+	//              build the Release configuration, or set -O2 on Debug.
+	//   ic=0/dc=0  instruction and data cache disabled. An F7 runs from flash
+	//              with 7 wait states, so without the I-cache and the ART
+	//              accelerator it stalls constantly; 3-6x. Fix: call
+	//              SCB_EnableICache() and SCB_EnableDCache() early in main().
+	//
+	// Note that D-cache ON has a consequence of its own: DMA buffers then need
+	// cache maintenance or MPU-marked non-cacheable memory, so enable it
+	// deliberately rather than reflexively.
+#if defined(__SOFTFP__)
+	const char *build_fpu = "SOFT";
+#elif defined(__ARM_FP)
+	const char *build_fpu = "HARD";
+#else
+	const char *build_fpu = "?";
+#endif
+#if defined(__OPTIMIZE_SIZE__)
+	const char *build_opt = "Os";
+#elif defined(__OPTIMIZE__)
+	const char *build_opt = "ON";
+#else
+	const char *build_opt = "OFF";
+#endif
+#if defined(SCB_CCR_IC_Msk) && defined(SCB_CCR_DC_Msk)
+	const int build_ic = (SCB->CCR & SCB_CCR_IC_Msk) ? 1 : 0;
+	const int build_dc = (SCB->CCR & SCB_CCR_DC_Msk) ? 1 : 0;
+#else
+	const int build_ic = -1; // host build: no Cortex-M control block
+	const int build_dc = -1;
+#endif
+	telemetry.send("$DIAG,BUILD fpu=%s opt=%s ic=%d dc=%d",
+			build_fpu, build_opt, build_ic, build_dc);
+
 	// Where the loop's time actually goes, as a share of uptime. Summed from
 	// HAL_GetTick() deltas: one sample quantises to 0 or 1 ms, but over
 	// thousands of calls that averages out, which is what makes a 1 ms tick
