@@ -42,6 +42,7 @@ void AccelerometerCalibrator::reset() {
     _stillness_threshold_sq = 0.2f * 0.2f;
     _offset_tumble = Vector3f();
     _matrix_tumble = Matrix3f::identity();
+    _last_residual = -1.0f;
 }
 
 void AccelerometerCalibrator::beginSixPosition(float motion_threshold) {
@@ -499,7 +500,9 @@ AccelCalStatus AccelerometerCalibrator::calibrateTumble() {
 
     // Last gate, and the only one that looks at how well the answer fits the
     // data rather than at the shape of the algebra.
-    if (fitResidual(offset, matrix) > ACCEL_CAL_MAX_FIT_RESIDUAL) {
+    // Recorded pass or fail -- see CompassCalibrator's note.
+    _last_residual = fitResidual(offset, matrix);
+    if (_last_residual > ACCEL_CAL_MAX_FIT_RESIDUAL) {
         _status = AccelCalStatus::FAILED_POOR_FIT;
         return _status;
     }

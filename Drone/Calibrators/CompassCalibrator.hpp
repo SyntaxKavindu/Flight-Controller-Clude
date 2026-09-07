@@ -125,6 +125,20 @@ public:
     uint16_t getSampleCount() const { return _sample_count; }
     uint8_t getFilledBinsCount() const { return _filled_bins; }
 
+    // How well the last calibrate() reproduced its own samples: RMS deviation
+    // from the nominal magnitude, as a fraction of it. -1 until one has run.
+    //
+    // This is the number that decides FAILED_POOR_FIT, and without it a
+    // rejection is unactionable -- 0.16 is a sweep that nearly worked and 0.90
+    // is a sensor or an environment that carries no usable field. The
+    // difference matters enormously to whoever has to decide what to do next,
+    // and it costs one float to report.
+    float getLastFitResidual() const { return _last_residual; }
+
+    // Shape of the sample cloud, 1.0 for a full sphere and 0.25 for a
+    // hemisphere. See scatterAnisotropy().
+    float getScatterRatio() const { return _scatter_ratio; }
+
     Vector3f correct(const Vector3f &raw) const;
     Vector3f getOffset() const { return _offset; }
     float getNominalRadius() const { return _nominal_radius; }
@@ -163,6 +177,9 @@ private:
     // and progress both read it, and both are queried far more often than the
     // cloud actually changes.
     float _scatter_ratio;
+
+    // Residual from the last calibrate(); see getLastFitResidual().
+    float _last_residual;
 
     float _nominal_radius;
     CalStatus _status;
