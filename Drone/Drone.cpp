@@ -65,14 +65,16 @@ Drone *g_drone = nullptr;
 
 Drone::Drone() :
 		_esekf { }, _bootStatus { GLOBALS_INIT_OK }, _lastPredictTick { 0 },
-		_lastFastTick { 0 }, _lastMidTick { 0 }, _lastSlowTick { 0 },
+		_lastFastTick { 0 }, _lastPollTick { 0 }, _pollSkipped { 0 },
+		_lastMidTick { 0 }, _lastSlowTick { 0 },
 		_lastPublishTick { 0 },
 		_lastReportedResetTime { ESEKF_NEVER_RESET }, _lastReportedBaroRejects { 0 },
 		_lastReportedEkfFaults { 0 }, _noEstimateSlowLoops { 0 },
 		_calibrationEpoch { 0 },
 		_pollMs { 0 }, _imuMs { 0 }, _fastMs { 0 }, _midMs { 0 }, _pubMs { 0 },
 		_slowMs { 0 },
-		_loopCount { 0 }, _fastCount { 0 }, _midCount { 0 }, _slowCount { 0 },
+		_loopCount { 0 }, _pollCount { 0 }, _fastCount { 0 }, _midCount { 0 },
+		_slowCount { 0 },
 		_publishCount { 0 } {
 }
 
@@ -112,6 +114,8 @@ void Drone::init(void) {
 	const uint32_t now = HAL_GetTick();
 	_lastPredictTick = now;
 	_lastFastTick = now;
+	_lastPollTick = now;
+	_pollSkipped = 0;
 	_lastMidTick = now;
 	_lastSlowTick = now;
 	_lastPublishTick = now;
@@ -157,23 +161,32 @@ void Drone::reportBootStatus(void) {
 void Drone::loop(void) {
 	_loopCount++;
 
-	// Host commands first, before anything reads the state they change. A
-	// CANCEL that arrived since the last pass has to take effect BEFORE the
-	// next sample is fed to a running calibration, or the procedure finishes
-	// one sample into a run the operator already stopped.
+	// One tick read for the whole pass, so every group is dispatched against a
+	// single clock -- two reads either side of a millisecond boundary would let
+	// the groups disagree about what time it is within one iteration.
+	const uint32_t now = HAL_GetTick();
+
+	// Host commands FIRST, ahead of every group below. A CANCEL that arrived
+	// since the last pass has to take effect BEFORE the next sample is fed to a
+	// running calibration, or the procedure finishes one sample into a run the
+	// operator already stopped. That ordering is the reason this sits at the top
+	// rather than anywhere else in the pass.
 	//
 	// This is also the only place commands are acted on: receive() runs in the
 	// USB interrupt and does nothing but buffer bytes, which is what makes
 	// Calibrator single-writer and lock-free. See Telemetry.hpp.
-	const uint32_t t_poll = HAL_GetTick();
-	telemetry.poll();
-
-	// One tick read for the whole pass, so every group is dispatched against a
-	// single clock -- two reads either side of a millisecond boundary would let
-	// the groups disagree about what time it is within one iteration. It doubles
-	// as the end stamp for poll() above; see the profiler note in Drone.hpp.
-	const uint32_t now = HAL_GetTick();
-	_pollMs += now - t_poll;
+	//
+	// Rate gated at 1 kHz, with a pass-count escape so a dead clock cannot take
+	// the command link with it -- see DRONE_POLL_HZ and DRONE_POLL_MAX_SKIP.
+	_pollSkipped++;
+	if (due(now, _lastPollTick, DRONE_POLL_PERIOD_MS)
+			|| _pollSkipped >= DRONE_POLL_MAX_SKIP) {
+		_pollSkipped = 0;
+		_pollCount++;
+		const uint32_t t0 = HAL_GetTick();
+		telemetry.poll();
+		_pollMs += HAL_GetTick() - t0;
+	}
 
 	// The fast group is gated like the rest. It used to run unconditionally,
 	// which on this MCU meant several IMU reads per millisecond of which all but
@@ -546,9 +559,10 @@ void Drone::publishState(void) {
 // ---------------------------------------------------------------------------
 // On-demand diagnostics (DIAG command)
 //
-// telemetry.poll() runs at the top of every pass with no rate gate at all, so
-// it is the one thing still reachable when every periodic group has gone
-// quiet -- which is exactly when you need to ask why.
+// telemetry.poll() runs at the top of every pass, ahead of every group, and its
+// pass-count escape means it keeps running even if the clock stops -- so it is
+// the one thing still reachable when every periodic group has gone quiet, which
+// is exactly when you need to ask why. See DRONE_POLL_MAX_SKIP.
 // ---------------------------------------------------------------------------
 void Drone::reportDiagnostics(void) {
 	// pass climbing means the loop is alive; tick is the clock it dispatches
@@ -561,7 +575,8 @@ void Drone::reportDiagnostics(void) {
 	// Each of these should climb at its declared rate. One stuck at 0 or 1
 	// means its gate stopped firing; one climbing with no output on the link
 	// means the group itself is returning early -- see $DIAG,EKF below.
-	telemetry.send("$DIAG,RATE fast=%lu mid=%lu pub=%lu slow=%lu",
+	telemetry.send("$DIAG,RATE poll=%lu fast=%lu mid=%lu pub=%lu slow=%lu",
+			(unsigned long) _pollCount,
 			(unsigned long) _fastCount,
 			(unsigned long) _midCount,
 			(unsigned long) _publishCount,
