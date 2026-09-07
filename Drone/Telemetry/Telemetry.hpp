@@ -34,6 +34,9 @@
  *         CANCEL           abort whatever calibration is running
  *         CALCLEAR         erase the stored calibration
  *         CALSTATUS        report what is calibrated / in progress
+ *         CALDUMP          print the correction currently applied: offsets,
+ *                          matrices, board rotation. After a power cycle this
+ *                          is what came back off the EEPROM.
  *         DIAG             dump loop counters and estimator health
  *
  * Out : one record per line, "$KEY,fields...\r\n". Callers build the record;

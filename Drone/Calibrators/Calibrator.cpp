@@ -448,6 +448,38 @@ void Calibrator::finishCompassCalibration() {
 	telemetry.send("$CAL,MAG,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 }
 
+// Reports what is APPLIED, not what is on the device. Those are the same thing
+// after a cold boot -- init() loads the gains and nothing else writes them --
+// which is what makes a power-cycle followed by this call a genuine test of
+// persistence. Within a session they can differ: a calibration that succeeded
+// but failed to save is live in RAM and absent from EEPROM, which is why the
+// storage state is reported alongside.
+void Calibrator::reportCalibration() {
+	telemetry.send("$CALDUMP,storage=%s", hasStorage() ? "OK" : "NONE");
+
+	telemetry.send("$STATUS,ACCL,%s,%s", _isAccelCalibrated ? "CAL" : "UNCAL",
+			_isAccelCalibrating ? "BUSY" : "IDLE");
+	if (_isAccelCalibrated) {
+		sendVector("ACCLOFFSET", _accelOffset);
+		sendMatrix("ACCLMATRIX", _accelMatrix);
+	}
+
+	telemetry.send("$STATUS,MAG,%s,%s", _isCompassCalibrated ? "CAL" : "UNCAL",
+			_isCompassCalibrating ? "BUSY" : "IDLE");
+	if (_isCompassCalibrated) {
+		sendVector("MAGOFFSET", _compassOffset);
+		sendMatrix("MAGMATRIX", _compassMatrix);
+	}
+
+	telemetry.send("$STATUS,LEVEL,%s,%s", _isLevelCalibrated ? "CAL" : "UNCAL",
+			_isLevelCalibrating ? "BUSY" : "IDLE");
+	if (_isLevelCalibrated) {
+		sendMatrix("BOARDROTATION", _boardRotation);
+	}
+
+	telemetry.send("$CALDUMP,END");
+}
+
 void Calibrator::sendVector(const char *key, const Vector3f &v) {
 	telemetry.send("$%s,%.5f,%.5f,%.5f", key, (double) v.x, (double) v.y,
 			(double) v.z);

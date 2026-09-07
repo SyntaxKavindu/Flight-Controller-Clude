@@ -196,6 +196,20 @@ public:
 	float getCompassProgressPercent() const;
 	float getLevelProgressPercent() const;
 
+	// Dump the correction the flight stack is CURRENTLY APPLYING: offsets,
+	// matrices and the board rotation, for all three procedures.
+	//
+	// These values are otherwise printed exactly once, at the moment a
+	// procedure finishes, and never again -- so after a reboot there was no way
+	// to see what had been restored from EEPROM, or to confirm anything had
+	// been. Power-cycle and call this: whatever it reports came off the device,
+	// because nothing else could have put it there.
+	void reportCalibration();
+
+	// False when no EEPROM handle was supplied to init(), in which case every
+	// calibration works for the session and none of it survives a reboot.
+	bool hasStorage() const { return _storage != nullptr; }
+
 	// True when the last completed calibration could not be written to EEPROM
 	// (no storage handle, or the device rejected the write). The gains are
 	// still applied for this session -- they just will not survive a reboot.

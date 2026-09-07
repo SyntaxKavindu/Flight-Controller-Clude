@@ -270,6 +270,14 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		return;
 	}
 
+	if (tokenEquals(name, "CALDUMP")) {
+		// Answerable at any time, calibrating or not: knowing what is applied
+		// right now is most useful precisely when something is going wrong.
+		send("$ACK,%s", echo);
+		calibrator.reportCalibration();
+		return;
+	}
+
 	if (tokenEquals(name, "CALSTATUS")) {
 		send("$ACK,%s", echo);
 		send("$STATUS,ACCL,%s,%s", calibrator.isAcclCalibrated() ? "CAL" : "UNCAL",
