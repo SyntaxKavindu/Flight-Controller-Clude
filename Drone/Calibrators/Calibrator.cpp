@@ -45,6 +45,7 @@ Calibrator::Calibrator() :
 				_isCompassCalibrated { false }, _isLevelCalibrated { false },
 				_lastSaveFailed { false }, _awaitingPosition { false },
 				_progressThrottle { 0 }, _feedDivider { 1 }, _feedPhase { 0 },
+				_chainLevel { false },
 				_calibrationEpoch { 0 },
 				_accelMisalignDeg { -1.0f },
 				_accelOffset { }, _accelMatrix { Matrix3f::identity() },
@@ -62,6 +63,7 @@ void Calibrator::init(EEPROM *storage) {
 	_isLevelCalibrating = false;
 	_awaitingPosition = false;
 	_progressThrottle = 0;
+	_chainLevel = false;
 	_lastSaveFailed = false;
 	_accelMisalignDeg = -1.0f;
 	_accelOffset = Vector3f();
@@ -126,14 +128,20 @@ bool Calibrator::beginProcedure(const char *stage) {
 	// be left at -- otherwise the first up to _feedDivider-1 samples after the
 	// operator sends READY are silently dropped.
 	_feedPhase = 0;
+	// Disarmed by default. startAccelerometerCalibration() re-arms it after
+	// this returns; every other procedure leaves it off.
+	_chainLevel = false;
 	_lastSaveFailed = false;
 	return true;
 }
 
-void Calibrator::startAccelerometerCalibration() {
+void Calibrator::startAccelerometerCalibration(bool chain_level) {
 	if (!beginProcedure("ACCL")) {
 		return;
 	}
+	// Set AFTER beginProcedure(), which clears it: a refused start must not
+	// leave a chain armed for whatever runs next.
+	_chainLevel = chain_level;
 	_isAccelCalibrating = true;
 	_isAccelCalibrated = false;
 	// beginSixPosition() resets the calibrator itself, so no separate reset().
@@ -366,6 +374,12 @@ void Calibrator::calibrateAccelerometer(Vector3f &acclData) {
 }
 
 void Calibrator::finishAccelCalibration() {
+	// Consumed here whatever happens next, so a failed or aborted fit cannot
+	// leave it armed. startLevelCalibration() runs beginProcedure(), which
+	// would clear it anyway -- this is about the paths that return early.
+	const bool chain_level = _chainLevel;
+	_chainLevel = false;
+
 	const AccelCalStatus status = _accelerometerCalibrator.calibrate();
 	if (status == AccelCalStatus::SUCCESS) {
 		adoptAccelResult();
@@ -399,6 +413,25 @@ void Calibrator::finishAccelCalibration() {
 		telemetry.send("$ACCLMISALIGN,%.2f", (double) _accelMisalignDeg);
 	}
 	telemetry.send("$CAL,ACCL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
+
+	// The sequence just ended on Z_DOWN: the airframe is upright, still, and
+	// reading (0,0,-g) -- exactly what levelling needs, and it is already
+	// there. Chaining here saves the operator a command AND a settling wait.
+	//
+	// Six-position only. A tumble ends wherever the operator happened to stop
+	// moving, which is not a level reference and usually not even close, so
+	// levelling from it would store a large bogus rotation. The flag is never
+	// set on that path, but the mode is re-checked rather than relying on that:
+	// this reads the state that actually matters.
+	//
+	// Not conditional on _lastSaveFailed. The gains are live for this session
+	// either way, and levelling on top of live gains is correct -- it just
+	// will not survive the reboot, which the ACCL line above already said.
+	if (chain_level
+			&& _accelerometerCalibrator.getMode() == AccelCalMode::SIX_POSITION) {
+		telemetry.send("$INFO,LEVELLING FROM Z_DOWN - KEEP THE AIRFRAME STILL");
+		startLevelCalibration(0.0f);
+	}
 }
 
 void Calibrator::setAccelPosition(AccelPosition pos) {
@@ -599,6 +632,7 @@ bool Calibrator::stopProcedures() {
 		_isLevelCalibrating = false;
 	}
 	_awaitingPosition = false;
+	_chainLevel = false;
 
 	return was_running;
 }

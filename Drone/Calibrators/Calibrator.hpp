@@ -175,7 +175,18 @@ public:
 
 	// Six-position accelerometer calibration: call this, then drive it with
 	// setAccelPosition() + calibrateAccelerometer() for each orientation.
-	void startAccelerometerCalibration();
+	//
+	// chain_level: run the board levelling immediately after the fit succeeds,
+	// with no further operator input. The sequence ends on Z_DOWN -- +Z, the
+	// body DOWN axis, pointing down, i.e. the airframe sitting upright reading
+	// (0,0,-g) -- which is exactly the orientation levelling wants, and the
+	// airframe is already still in it. Six-position only: a tumble finishes in
+	// whatever orientation the operator stopped in, so it is never chained.
+	//
+	// This makes the surface the six-position run finished on the reference
+	// that DEFINES level for the airframe. That is the whole reason it is a
+	// parameter and not the default -- see the note at startLevelCalibration().
+	void startAccelerometerCalibration(bool chain_level = false);
 	// Alternative single-shot accelerometer procedure: tumble the airframe
 	// through as many orientations as possible, pausing briefly in each.
 	// Mutually exclusive with the six-position sequence above.
@@ -189,6 +200,19 @@ public:
 	//
 	// yaw_offset_deg: mounting rotation about the vertical, which gravity
 	// cannot observe. See LevelCalibrator::begin().
+	//
+	// Whatever surface the airframe is resting on when this runs BECOMES the
+	// definition of level for every later flight: the fit stores the residual
+	// attitude as a correction, so a bench that is a degree out puts a degree
+	// of bias into level hover for good. Two things follow, and they are why
+	// this is a deliberate operator action rather than something chained
+	// automatically onto the end of every accelerometer run:
+	//
+	//   - the surface has to be one the operator has actually checked, not
+	//     merely a flat one;
+	//   - the board has to be IN the airframe. Levelling measures a MOUNTING
+	//     property, so a six-position run done on a loose board on the bench
+	//     has nothing meaningful to level against.
 	void startLevelCalibration(float yaw_offset_deg = 0.0f);
 
 	// Rate, in Hz, at which calibrateAccelerometer() and calibrateLevel() will
@@ -338,6 +362,11 @@ private:
 	// start of each procedure so a run always begins on an accepted sample.
 	uint16_t _feedDivider;
 	uint16_t _feedPhase;
+
+	// Set by startAccelerometerCalibration(true); consumed once by
+	// finishAccelCalibration(). Cleared on cancel so an abandoned run cannot
+	// chain a levelling onto a later, unrelated one.
+	bool _chainLevel;
 
 	// See getCalibrationEpoch().
 	uint32_t _calibrationEpoch;

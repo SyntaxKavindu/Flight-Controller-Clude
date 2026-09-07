@@ -313,5 +313,85 @@ int main()
         checkNear(err, 0.0f, 0.02f, "the decimated levelling fit is just as accurate");
     }
 
+    section("CALIMU,LEVEL chains levelling onto the six-position run");
+    // init() deliberately does not clear the divider (see above), and the
+    // decimation section left it at 5. These blocks count calls, so put it
+    // back rather than quietly running them five times short.
+    calibrator.setAccelFeedRate(200);
+    {
+        // The sequence ends on Z_DOWN -- +Z (the body DOWN axis) pointing down,
+        // i.e. the airframe upright reading (0,0,-g). That is exactly what the
+        // levelling fit wants, and the airframe is already still in it, so the
+        // level run can start with no operator input at all.
+        calibrator.init(nullptr);
+
+        // A board bolted in 3 degrees out about roll. The six-position truth
+        // vectors are what the SENSOR sees, so the mounting tilt shows up in
+        // the Z_DOWN reading -- which is the whole point: that residual is
+        // what levelling is there to measure.
+        const float a = 3.0f * D2R, c = std::cos(a), sn = std::sin(a);
+        auto tilt = [&](const Vector3f &v) {
+            return Vector3f(v.x, c*v.y - sn*v.z, sn*v.y + c*v.z);
+        };
+
+        calibrator.startAccelerometerCalibration(true);
+        const Vector3f truth[6] = {{G,0,0},{-G,0,0},{0,G,0},{0,-G,0},{0,0,G},{0,0,-G}};
+        for (int p = 0; p < 6 && calibrator.isAcclCalibrating(); p++) {
+            calibrator.confirmReady();
+            for (int i = 0; i < 120 && calibrator.isAcclCalibrating(); i++) {
+                Vector3f smp = truth[p];
+                calibrator.calibrateAccelerometer(smp);
+            }
+        }
+        check(calibrator.isAcclCalibrated(), "the six-position fit still completes");
+        check(calibrator.isLevelCalibrating(),
+              "levelling starts by itself -- no second command");
+        check(calibrator.isCalibrating(), "isCalibrating() covers the chained run");
+
+        // The operator has not moved anything: keep feeding the Z_DOWN reading.
+        const Vector3f measured = tilt(Vector3f(0.0f, 0.0f, -G));
+        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; calibrator.calibrateLevel(v);
+        }
+        check(calibrator.isLevelCalibrated(), "the chained levelling completes");
+
+        Vector3f corrected = measured;
+        calibrator.correctBoardFrame(corrected);
+        const Vector3f level(0.0f, 0.0f, -G);
+        const float err = std::acos(std::fmin(1.0f,
+                corrected.dot(level) / (corrected.length()*G))) * R2D;
+        checkNear(err, 0.0f, 0.02f, "... and removes the mounting tilt it was chained for");
+    }
+    {
+        // Default is unchanged: a plain CALIMU must not silently promote
+        // whatever surface it ran on into the definition of level.
+        calibrator.init(nullptr);
+        runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));
+        check(calibrator.isAcclCalibrated(), "plain six-position completes");
+        check(!calibrator.isLevelCalibrating(), "plain CALIMU does NOT chain");
+        check(!calibrator.isCalibrating(), "... and leaves the facade idle");
+    }
+    {
+        // A cancelled run must not leave a chain armed for whatever runs next.
+        calibrator.init(nullptr);
+        calibrator.startAccelerometerCalibration(true);
+        calibrator.cancelCalibration();
+        check(!calibrator.isCalibrating(), "the armed run cancels cleanly");
+        runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));
+        check(calibrator.isAcclCalibrated(), "a later plain run completes");
+        check(!calibrator.isLevelCalibrating(),
+              "... and does not inherit the cancelled run's chain");
+    }
+    {
+        // A tumble ends in whatever orientation the operator stopped in, which
+        // is not a level reference. The flag is never set on that path, but the
+        // mode is re-checked in finishAccelCalibration() rather than trusted.
+        calibrator.init(nullptr);
+        calibrator.startAccelerometerTumbleCalibration();
+        check(calibrator.isAcclCalibrating(), "tumble starts");
+        calibrator.cancelCalibration();
+        check(!calibrator.isLevelCalibrating(), "a tumble never chains levelling");
+    }
+
     return testReport("Integration");
 }

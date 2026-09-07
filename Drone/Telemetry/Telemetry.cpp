@@ -191,7 +191,13 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 
 	if (tokenEquals(name, "CALIMU")) {
 		const bool tumble = (arg != nullptr) && tokenEquals(arg, "TUMBLE");
-		if (arg != nullptr && !tumble && *arg != '\0') {
+		// The six-position sequence ends on Z_DOWN, which IS the levelling
+		// orientation, so the airframe is already upright and still when the
+		// fit lands. This chains the levelling straight onto it -- no second
+		// command, no second settle. See Calibrator::startLevelCalibration()
+		// for why it is asked for rather than always done.
+		const bool level = (arg != nullptr) && tokenEquals(arg, "LEVEL");
+		if (arg != nullptr && !tumble && !level && *arg != '\0') {
 			send("$NAK,%s,UNKNOWN", echo);
 			return;
 		}
@@ -200,7 +206,7 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		if (tumble) {
 			calibrator.startAccelerometerTumbleCalibration();
 		} else {
-			calibrator.startAccelerometerCalibration();
+			calibrator.startAccelerometerCalibration(level);
 		}
 		return;
 	}
