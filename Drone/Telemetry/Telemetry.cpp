@@ -65,7 +65,8 @@ char *trim(char *s) {
 
 Telemetry::Telemetry() :
 		_rx_ring { }, _rx_head { 0 }, _rx_tail { 0 }, _rx_dropped { 0 },
-		_rx_dropped_reported { 0 }, _line_len { 0 }, _line_dropped { false },
+		_rx_dropped_reported { 0 }, _rx_bytes { 0 }, _lines { 0 },
+		_line_len { 0 }, _line_dropped { false },
 		_tx_buf { }, _tx_which { 0 }, _tx_dropped { 0 } {
 	_line[0] = '\0';
 }
@@ -78,6 +79,11 @@ void Telemetry::receive(const char *data, uint16_t len) {
 	if (data == nullptr) {
 		return;
 	}
+
+	// Counted before anything can reject a byte, so this is proof the interrupt
+	// reached us at all -- which is the one thing a dead command link cannot
+	// otherwise distinguish from a mis-typed command. See getRxByteCount().
+	_rx_bytes += len;
 
 	// INTERRUPT CONTEXT. Bounded, allocation-free, no reentrancy into anything
 	// the main loop owns: copy and leave. See the note in the header for why.
@@ -134,6 +140,7 @@ void Telemetry::consumeByte(char c) {
 		}
 		if (_line_len > 0) {
 			_line[_line_len] = '\0';
+			_lines++;
 			dispatchLine(_line, _line_len);
 			_line_len = 0;
 		}

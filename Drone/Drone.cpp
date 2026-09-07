@@ -343,11 +343,18 @@ void Drone::slowLoop(void) {
 	// pass is the number that matters. If it climbs, the loop is running and
 	// any missing output is a group bailing out. If it is frozen, or the line
 	// stops arriving, the loop really has stopped.
-	telemetry.send("$HB,pass=%lu tick=%lu init=%u div=%u",
+	// rx and cmd are here rather than only in $DIAG deliberately: if the command
+	// link is broken, DIAG is exactly the thing that cannot be asked for. The
+	// heartbeat is the one line that arrives with no command at all, so the
+	// evidence about why commands are not working has to travel on it. See
+	// Telemetry::getRxByteCount() for how to read them.
+	telemetry.send("$HB,pass=%lu tick=%lu init=%u div=%u rx=%lu cmd=%lu",
 			(unsigned long) _loopCount,
 			(unsigned long) HAL_GetTick(),
 			(unsigned) (_esekf.isInitialized() ? 1 : 0),
-			(unsigned) (_esekf.hasDiverged() ? 1 : 0));
+			(unsigned) (_esekf.hasDiverged() ? 1 : 0),
+			(unsigned long) telemetry.getRxByteCount(),
+			(unsigned long) telemetry.getLineCount());
 
 	reportEstimatorHealth();
 

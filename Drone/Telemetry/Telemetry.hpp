@@ -88,6 +88,25 @@ public:
 	// Non-zero means the loop stalled long enough to lose a command.
 	uint32_t getRxDroppedCount(void) const { return _rx_dropped; }
 
+	// Total bytes receive() has been OFFERED since boot, and complete lines
+	// poll() has dispatched. Reported in the heartbeat, because they answer the
+	// one question a silent command link otherwise cannot:
+	//
+	//   rx = 0            nothing is reaching receive() at all. The USB RX
+	//                     interrupt is not calling Telemetry_Receive() -- see
+	//                     TelemetryCBridge.h, which has to be wired into
+	//                     CDC_Receive_FS() by hand. Nothing in the C++ side can
+	//                     detect that omission; only this counter can.
+	//   rx > 0, cmd = 0   bytes arrive but no line is ever completed: the host
+	//                     is not sending a CR or LF terminator.
+	//   rx > 0, cmd > 0   the link works and the command was acted on; an
+	//                     unrecognised one answers $NAK.
+	//
+	// Counted as offered rather than as stored, so a full ring shows up as
+	// rx climbing while getRxDroppedCount() climbs with it.
+	uint32_t getRxByteCount(void) const { return _rx_bytes; }
+	uint32_t getLineCount(void) const { return _lines; }
+
 	// Lines dropped because the endpoint stayed busy past the timeout. Output
 	// is expendable; the flight loop is not.
 	uint32_t getTxDroppedCount(void) const { return _tx_dropped; }
@@ -106,6 +125,11 @@ private:
 	volatile uint16_t _rx_tail;
 	volatile uint32_t _rx_dropped;
 	uint32_t _rx_dropped_reported;
+	// Written by the ISR, read by the main loop for the heartbeat. A torn read
+	// of a 32-bit counter is not possible on this core, and an off-by-one in a
+	// diagnostic would not matter anyway.
+	volatile uint32_t _rx_bytes;
+	uint32_t _lines;
 
 	// Line assembly. Touched only by poll(), so it needs no guarding.
 	char _line[TELEMETRY_LINE_MAX + 1];
