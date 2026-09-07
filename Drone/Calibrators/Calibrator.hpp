@@ -75,12 +75,43 @@ enum class Calibrator_StatusTypeDef{
 struct CalibrationRecord {
 	uint16_t magic;
 	uint8_t  version;
-	uint8_t  reserved;
+
+	// Worst-case cross-axis misalignment the six-position fit LEFT BEHIND,
+	// in tenths of a degree, PLUS ONE. Zero means "not recorded".
+	//
+	// The +1 is what makes this backward compatible. This byte was `reserved`
+	// and written as zero, so every record already on a device decodes as "not
+	// recorded" rather than as a perfect 0.00 deg -- which is the one reading
+	// that would be actively misleading. No version bump, and an existing
+	// calibration keeps working.
+	//
+	// One byte is enough: the useful range is 0..25.4 deg in 0.1 deg steps, and
+	// anything past a couple of degrees means "use tumble" long before the
+	// resolution matters. It sits ahead of `crc` so it is covered by it.
+	//
+	// Absent for a tumble fit, which removes cross-axis error rather than
+	// leaving it, and for the compass and levelling records, where the quantity
+	// has no meaning.
+	uint8_t  misalign_deci;
+
 	float    offset[3];
 	float    matrix[9];
 	uint16_t crc;      // CRC-16/CCITT-FALSE over every byte before this field
 	uint16_t pad;
 };
+
+// Encode/decode for the field above. -1 means "not recorded" on both sides.
+inline uint8_t calibrationEncodeMisalign(float deg) {
+	if (!(deg >= 0.0f)) {          // also catches NaN
+		return 0;
+	}
+	const long v = (long) (deg * 10.0f + 0.5f) + 1;
+	return (v > 255) ? (uint8_t) 255 : (uint8_t) v;
+}
+
+inline float calibrationDecodeMisalign(uint8_t stored) {
+	return (stored == 0) ? -1.0f : (float) (stored - 1) * 0.1f;
+}
 
 static_assert(sizeof(CalibrationRecord) == 56,
 		"CalibrationRecord must stay 56 bytes to fit an EEPROM slot");
@@ -226,10 +257,14 @@ public:
 	// Also useful to a ground-station or config tool that needs to build or
 	// validate a record without an MCU.
 	static uint16_t recordCrc(const CalibrationRecord &rec);
+	// misalign_deg: -1 when the quantity does not apply, which is every record
+	// except a six-position accelerometer fit. unpackRecord() hands back -1 for
+	// a record that predates the field, so a caller cannot tell "not recorded"
+	// from "recorded as zero" by accident.
 	static void packRecord(const Vector3f &offset, const Matrix3f &matrix,
-			CalibrationRecord &out);
+			CalibrationRecord &out, float misalign_deg = -1.0f);
 	static bool unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-			Matrix3f &matrix);
+			Matrix3f &matrix, float *misalign_deg = nullptr);
 
 private:
 	AccelerometerCalibrator _accelerometerCalibrator;
@@ -264,6 +299,11 @@ private:
 	// calibrator objects on every sample: a calibration restored from EEPROM
 	// has no estimator state behind it, so the facade has to own the gains for
 	// the boot path and the just-calibrated path to behave identically.
+	// Cross-axis misalignment the stored accelerometer fit left behind, in
+	// degrees; -1 when not recorded. Persisted, so CALDUMP can report it after
+	// a reboot instead of it existing only in the one line CALIMU printed.
+	float _accelMisalignDeg;
+
 	Vector3f _accelOffset;
 	Matrix3f    _accelMatrix;
 	Vector3f _compassOffset;
@@ -312,9 +352,10 @@ private:
 
 
 	Calibrator_StatusTypeDef loadRecord(EEPROMLocation location,
-			Vector3f &offset, Matrix3f &matrix);
+			Vector3f &offset, Matrix3f &matrix, float *misalign_deg = nullptr);
 	Calibrator_StatusTypeDef saveRecord(EEPROMLocation location,
-			const Vector3f &offset, const Matrix3f &matrix);
+			const Vector3f &offset, const Matrix3f &matrix,
+			float misalign_deg = -1.0f);
 };
 
 // The one calibrator. Telemetry drives it; the sensor frontends feed and

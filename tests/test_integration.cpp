@@ -154,5 +154,49 @@ int main()
         check(!Calibrator::unpackRecord(rec, off, m), "a NaN payload is rejected even with a good CRC");
     }
 
+    section("Stored cross-axis misalignment");
+    {
+        CalibrationRecord rec;
+        Vector3f o(1.0f, 2.0f, 3.0f), off;
+        Matrix3f mm = Matrix3f::identity(), m;
+        float got = -99.0f;
+
+        // Round-trips at 0.1 deg resolution across the useful range.
+        static const float degs[] = {0.0f, 0.4f, 1.2f, 5.0f, 25.4f};
+        for (float deg : degs) {
+            Calibrator::packRecord(o, mm, rec, deg);
+            got = -99.0f;
+            check(Calibrator::unpackRecord(rec, off, m, &got), "record with misalignment round-trips");
+            checkNear(got, deg, 0.06f, "misalignment survives storage");
+        }
+
+        // -1 in, -1 out: "not applicable" must not become "zero".
+        Calibrator::packRecord(o, mm, rec, -1.0f);
+        got = -99.0f;
+        Calibrator::unpackRecord(rec, off, m, &got);
+        checkNear(got, -1.0f, 0.001f, "a tumble fit stores 'not recorded', not 0.00");
+
+        // THE compatibility case: a record written before this field existed
+        // had that byte as zero. It must decode as absent, never as a perfect
+        // 0.00 deg -- which would read as the best calibration possible.
+        Calibrator::packRecord(o, mm, rec, 3.0f);
+        rec.misalign_deci = 0;                 // as an older record would have it
+        rec.crc = Calibrator::recordCrc(rec);  // ... with its own valid CRC
+        got = -99.0f;
+        check(Calibrator::unpackRecord(rec, off, m, &got), "a pre-existing record still loads");
+        checkNear(got, -1.0f, 0.001f, "... and reports 'not recorded' rather than 0.00 deg");
+
+        // The field sits ahead of crc, so corruption of it is caught.
+        Calibrator::packRecord(o, mm, rec, 3.0f);
+        rec.misalign_deci = 99;
+        check(!Calibrator::unpackRecord(rec, off, m, &got),
+              "a corrupted misalignment byte fails the CRC");
+
+        // Out-of-range input saturates rather than wrapping to a small angle.
+        Calibrator::packRecord(o, mm, rec, 900.0f);
+        Calibrator::unpackRecord(rec, off, m, &got);
+        check(got > 25.0f, "an absurd misalignment saturates high, it does not wrap");
+    }
+
     return testReport("Integration");
 }
