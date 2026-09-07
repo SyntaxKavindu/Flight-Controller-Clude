@@ -213,6 +213,23 @@ private:
 	// see the re-seed in fastLoop().
 	uint32_t _calibrationEpoch;
 
+	// ---- Section profiler ----
+	// Milliseconds accumulated inside each group since boot, summed from
+	// HAL_GetTick() deltas. NOT a microsecond timer, and it does not need to be:
+	// one sample quantises to 0 or 1 ms, but summed over thousands of calls the
+	// quantisation averages out and the total is accurate to a tick. That is
+	// what makes a 1 kHz SysTick enough to profile a loop running at hundreds of
+	// hertz, with no DWT cycle counter and no spare hardware timer.
+	//
+	// Read them as a SHARE OF UPTIME: a group taking 60% of the clock is the one
+	// to fix, whatever its mean looks like.
+	uint32_t _pollMs;   // telemetry.poll()
+	uint32_t _imuMs;    // imu.update() alone, inside the fast group
+	uint32_t _fastMs;   // the whole fast group, imu.update() included
+	uint32_t _midMs;
+	uint32_t _pubMs;
+	uint32_t _slowMs;
+
 	// Pass counters. Not statistics -- diagnostics. A frozen _loopCount means
 	// the loop stopped; a climbing _loopCount with a frozen _midCount means a
 	// rate gate stopped firing; both climbing with no output means the group

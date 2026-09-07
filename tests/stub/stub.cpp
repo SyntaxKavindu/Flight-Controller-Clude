@@ -24,7 +24,9 @@ I2C_HandleTypeDef hi2c1, hi2c3;
 bool g_stub_echo_telemetry = false;
 
 extern "C" {
+uint32_t SystemCoreClock = 216000000u;
 uint32_t HAL_GetTick(void) { return 0; }
+HAL_TickFreqTypeDef HAL_GetTickFreq(void) { return HAL_TICK_FREQ_1KHZ; }
 void HAL_Delay(uint32_t) {}
 void HAL_GPIO_WritePin(GPIO_TypeDef*, uint16_t, GPIO_PinState) {}
 HAL_StatusTypeDef HAL_SPI_Transmit(SPI_HandleTypeDef*, uint8_t*, uint16_t, uint32_t) { return HAL_OK; }

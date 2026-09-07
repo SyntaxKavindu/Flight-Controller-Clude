@@ -70,6 +70,8 @@ Drone::Drone() :
 		_lastReportedResetTime { ESEKF_NEVER_RESET }, _lastReportedBaroRejects { 0 },
 		_lastReportedEkfFaults { 0 }, _noEstimateSlowLoops { 0 },
 		_calibrationEpoch { 0 },
+		_pollMs { 0 }, _imuMs { 0 }, _fastMs { 0 }, _midMs { 0 }, _pubMs { 0 },
+		_slowMs { 0 },
 		_loopCount { 0 }, _fastCount { 0 }, _midCount { 0 }, _slowCount { 0 },
 		_publishCount { 0 } {
 }
@@ -163,12 +165,15 @@ void Drone::loop(void) {
 	// This is also the only place commands are acted on: receive() runs in the
 	// USB interrupt and does nothing but buffer bytes, which is what makes
 	// Calibrator single-writer and lock-free. See Telemetry.hpp.
+	const uint32_t t_poll = HAL_GetTick();
 	telemetry.poll();
 
 	// One tick read for the whole pass, so every group is dispatched against a
 	// single clock -- two reads either side of a millisecond boundary would let
-	// the groups disagree about what time it is within one iteration.
+	// the groups disagree about what time it is within one iteration. It doubles
+	// as the end stamp for poll() above; see the profiler note in Drone.hpp.
 	const uint32_t now = HAL_GetTick();
+	_pollMs += now - t_poll;
 
 	// The fast group is gated like the rest. It used to run unconditionally,
 	// which on this MCU meant several IMU reads per millisecond of which all but
@@ -176,19 +181,27 @@ void Drone::loop(void) {
 	// See the loop-rate banner in Drone.hpp.
 	if (due(now, _lastFastTick, DRONE_FAST_LOOP_PERIOD_MS)) {
 		_fastCount++;
+		const uint32_t t0 = HAL_GetTick();
 		fastLoop();
+		_fastMs += HAL_GetTick() - t0;
 	}
 	if (due(now, _lastMidTick, DRONE_MID_LOOP_PERIOD_MS)) {
 		_midCount++;
+		const uint32_t t0 = HAL_GetTick();
 		midLoop();
+		_midMs += HAL_GetTick() - t0;
 	}
 	if (due(now, _lastPublishTick, DRONE_PUBLISH_PERIOD_MS)) {
 		_publishCount++;
+		const uint32_t t0 = HAL_GetTick();
 		publishState();
+		_pubMs += HAL_GetTick() - t0;
 	}
 	if (due(now, _lastSlowTick, DRONE_SLOW_LOOP_PERIOD_MS)) {
 		_slowCount++;
+		const uint32_t t0 = HAL_GetTick();
 		slowLoop();
+		_slowMs += HAL_GetTick() - t0;
 	}
 }
 
@@ -196,7 +209,12 @@ void Drone::loop(void) {
 // Fast group: IMU, estimator propagation, accelerometer fusion.
 // ---------------------------------------------------------------------------
 void Drone::fastLoop(void) {
+	// Timed separately from the rest of the group: a slow SPI bus and a slow
+	// estimator need completely different fixes, and the totals cannot tell
+	// them apart.
+	const uint32_t t_imu = HAL_GetTick();
 	imu.update(); // also feeds a running accelerometer calibration
+	_imuMs += HAL_GetTick() - t_imu;
 
 	IMU_Data imu_data;
 	const bool imu_ok = (imu.getData(imu_data) == IMU_StatusTypeDef::OK);
@@ -343,11 +361,18 @@ void Drone::slowLoop(void) {
 	// pass is the number that matters. If it climbs, the loop is running and
 	// any missing output is a group bailing out. If it is frozen, or the line
 	// stops arriving, the loop really has stopped.
-	telemetry.send("$HB,pass=%lu tick=%lu init=%u div=%u",
+	// rx and cmd are here rather than only in $DIAG deliberately: if the command
+	// link is broken, DIAG is exactly the thing that cannot be asked for. The
+	// heartbeat is the one line that arrives with no command at all, so the
+	// evidence about why commands are not working has to travel on it. See
+	// Telemetry::getRxByteCount() for how to read them.
+	telemetry.send("$HB,pass=%lu tick=%lu init=%u div=%u rx=%lu cmd=%lu",
 			(unsigned long) _loopCount,
 			(unsigned long) HAL_GetTick(),
 			(unsigned) (_esekf.isInitialized() ? 1 : 0),
-			(unsigned) (_esekf.hasDiverged() ? 1 : 0));
+			(unsigned) (_esekf.hasDiverged() ? 1 : 0),
+			(unsigned long) telemetry.getRxByteCount(),
+			(unsigned long) telemetry.getLineCount());
 
 	reportEstimatorHealth();
 
@@ -541,6 +566,84 @@ void Drone::reportDiagnostics(void) {
 			(unsigned long) _midCount,
 			(unsigned long) _publishCount,
 			(unsigned long) _slowCount);
+
+	// The CPU clock the HAL believes it configured. Report it because a loop
+	// that is inexplicably slow is very often a clock tree that never left the
+	// internal oscillator: an F7 running on 16 MHz HSI instead of a 216 MHz PLL
+	// is 13x down on every figure above and nothing else in the output says so.
+	// Also worth knowing that on an F7 the instruction cache and the ART
+	// accelerator are OFF unless main() enables them, which alone is worth
+	// several times the execution speed out of flash.
+	telemetry.send("$DIAG,CLOCK hz=%lu tickhz=%lu",
+			(unsigned long) SystemCoreClock,
+			(unsigned long) (1000u / (HAL_GetTickFreq() ? HAL_GetTickFreq() : 1u)));
+
+	// How this binary was BUILT, which is the difference between the estimator
+	// costing 150 us and costing 2.5 ms. None of it is visible from any other
+	// output, and all of it is a project setting rather than a code defect:
+	//
+	//   fpu=SOFT   every float operation is a library call. On a part with an
+	//              FPU this is 10-50x. Fix: -mfloat-abi=hard -mfpu=fpv5-sp-d16.
+	//   opt=OFF    built at -O0, which is CubeIDE's Debug default. Float-heavy
+	//              code spills every intermediate to the stack; 5-15x. Fix:
+	//              build the Release configuration, or set -O2 on Debug.
+	//   ic=0/dc=0  instruction and data cache disabled. An F7 runs from flash
+	//              with 7 wait states, so without the I-cache and the ART
+	//              accelerator it stalls constantly; 3-6x. Fix: call
+	//              SCB_EnableICache() and SCB_EnableDCache() early in main().
+	//
+	// Note that D-cache ON has a consequence of its own: DMA buffers then need
+	// cache maintenance or MPU-marked non-cacheable memory, so enable it
+	// deliberately rather than reflexively.
+#if defined(__SOFTFP__)
+	const char *build_fpu = "SOFT";
+#elif defined(__ARM_FP)
+	const char *build_fpu = "HARD";
+#else
+	const char *build_fpu = "?";
+#endif
+#if defined(__OPTIMIZE_SIZE__)
+	const char *build_opt = "Os";
+#elif defined(__OPTIMIZE__)
+	const char *build_opt = "ON";
+#else
+	const char *build_opt = "OFF";
+#endif
+#if defined(SCB_CCR_IC_Msk) && defined(SCB_CCR_DC_Msk)
+	const int build_ic = (SCB->CCR & SCB_CCR_IC_Msk) ? 1 : 0;
+	const int build_dc = (SCB->CCR & SCB_CCR_DC_Msk) ? 1 : 0;
+#else
+	const int build_ic = -1; // host build: no Cortex-M control block
+	const int build_dc = -1;
+#endif
+	telemetry.send("$DIAG,BUILD fpu=%s opt=%s ic=%d dc=%d",
+			build_fpu, build_opt, build_ic, build_dc);
+
+	// Where the loop's time actually goes, as a share of uptime. Summed from
+	// HAL_GetTick() deltas: one sample quantises to 0 or 1 ms, but over
+	// thousands of calls that averages out, which is what makes a 1 ms tick
+	// enough to profile this without a cycle counter.
+	//
+	// imu is inside fast, so `fast - imu` is the estimator's own cost. The group
+	// with the largest share is the one to fix; if they sum to far less than
+	// 100%, the time is going somewhere not measured here -- an interrupt
+	// handler, or a HAL call blocking outside these brackets.
+	const uint32_t up = HAL_GetTick() ? HAL_GetTick() : 1u;
+	telemetry.send("$DIAG,TIME poll=%lu%% imu=%lu%% fast=%lu%% mid=%lu%% pub=%lu%% slow=%lu%%",
+			(unsigned long) (100u * _pollMs / up),
+			(unsigned long) (100u * _imuMs / up),
+			(unsigned long) (100u * _fastMs / up),
+			(unsigned long) (100u * _midMs / up),
+			(unsigned long) (100u * _pubMs / up),
+			(unsigned long) (100u * _slowMs / up));
+
+	// The same totals in raw milliseconds, so a group that rounds to 0% is still
+	// visible and the numbers can be checked against uptime by hand.
+	telemetry.send("$DIAG,TIMEMS up=%lu poll=%lu imu=%lu fast=%lu mid=%lu pub=%lu slow=%lu",
+			(unsigned long) up,
+			(unsigned long) _pollMs, (unsigned long) _imuMs,
+			(unsigned long) _fastMs, (unsigned long) _midMs,
+			(unsigned long) _pubMs, (unsigned long) _slowMs);
 
 	// The accelerometer's motion gate, which is the one estimator parameter
 	// that has to be tuned against the airframe rather than reasoned about.
