@@ -45,6 +45,7 @@ Calibrator::Calibrator() :
 				_isCompassCalibrated { false }, _isLevelCalibrated { false },
 				_lastSaveFailed { false }, _awaitingPosition { false },
 				_progressThrottle { 0 }, _calibrationEpoch { 0 },
+				_accelMisalignDeg { -1.0f },
 				_accelOffset { }, _accelMatrix { Matrix3f::identity() },
 				_compassOffset { }, _compassMatrix { Matrix3f::identity() },
 				_boardRotation { Matrix3f::identity() } {
@@ -61,6 +62,7 @@ void Calibrator::init(EEPROM *storage) {
 	_awaitingPosition = false;
 	_progressThrottle = 0;
 	_lastSaveFailed = false;
+	_accelMisalignDeg = -1.0f;
 	_accelOffset = Vector3f();
 	_accelMatrix = Matrix3f::identity();
 	_compassOffset = Vector3f();
@@ -311,6 +313,9 @@ void Calibrator::finishAccelCalibration() {
 	const AccelCalStatus status = _accelerometerCalibrator.calibrate();
 	if (status == AccelCalStatus::SUCCESS) {
 		adoptAccelResult();
+		// Captured BEFORE the save, so it goes into the record. -1 for a tumble
+		// fit, which removes the cross-axis error rather than leaving it.
+		_accelMisalignDeg = _accelerometerCalibrator.getMaxMisalignmentDeg();
 		_isAccelCalibrated = true;
 		noteGainsChanged();
 		// A failed write is not a failed calibration: the gains are live for
@@ -334,9 +339,8 @@ void Calibrator::finishAccelCalibration() {
 	telemetry.send("$CAL,ACCL,OK");
 	sendVector("ACCLOFFSET", _accelOffset);
 	sendMatrix("ACCLMATRIX", _accelMatrix);
-	if (_accelerometerCalibrator.getMode() == AccelCalMode::SIX_POSITION) {
-		telemetry.send("$ACCLMISALIGN,%.2f",
-				(double) _accelerometerCalibrator.getMaxMisalignmentDeg());
+	if (_accelMisalignDeg >= 0.0f) {
+		telemetry.send("$ACCLMISALIGN,%.2f", (double) _accelMisalignDeg);
 	}
 	telemetry.send("$CAL,ACCL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 }
@@ -462,6 +466,11 @@ void Calibrator::reportCalibration() {
 	if (_isAccelCalibrated) {
 		sendVector("ACCLOFFSET", _accelOffset);
 		sendMatrix("ACCLMATRIX", _accelMatrix);
+		// Absent for a tumble fit, and for a record written before the field
+		// existed. Silence means "not recorded", never "zero".
+		if (_accelMisalignDeg >= 0.0f) {
+			telemetry.send("$ACCLMISALIGN,%.2f", (double) _accelMisalignDeg);
+		}
 	}
 
 	telemetry.send("$STATUS,MAG,%s,%s", _isCompassCalibrated ? "CAL" : "UNCAL",
@@ -608,12 +617,12 @@ uint16_t Calibrator::recordCrc(const CalibrationRecord &rec) {
 }
 
 void Calibrator::packRecord(const Vector3f &offset, const Matrix3f &matrix,
-		CalibrationRecord &out) {
-	memset(&out, 0, sizeof(out)); // keeps reserved/pad deterministic for the CRC
+		CalibrationRecord &out, float misalign_deg) {
+	memset(&out, 0, sizeof(out)); // keeps pad deterministic for the CRC
 
 	out.magic = CALIBRATION_RECORD_MAGIC;
 	out.version = CALIBRATION_RECORD_VERSION;
-	out.reserved = 0;
+	out.misalign_deci = calibrationEncodeMisalign(misalign_deg);
 
 	out.offset[0] = offset.x;
 	out.offset[1] = offset.y;
@@ -630,7 +639,7 @@ void Calibrator::packRecord(const Vector3f &offset, const Matrix3f &matrix,
 }
 
 bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-		Matrix3f &matrix) {
+		Matrix3f &matrix, float *misalign_deg) {
 	if (rec.magic != CALIBRATION_RECORD_MAGIC) {
 		return false;
 	}
@@ -650,6 +659,9 @@ bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
 		if (!std::isfinite(rec.matrix[i])) return false;
 	}
 
+	if (misalign_deg != nullptr) {
+		*misalign_deg = calibrationDecodeMisalign(rec.misalign_deci);
+	}
 	offset = Vector3f(rec.offset[0], rec.offset[1], rec.offset[2]);
 	for (int i = 0; i < 3; i++) {
 		for (int j = 0; j < 3; j++) {
@@ -660,7 +672,7 @@ bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
 }
 
 Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
-		Vector3f &offset, Matrix3f &matrix) {
+		Vector3f &offset, Matrix3f &matrix, float *misalign_deg) {
 	if (_storage == nullptr) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
@@ -669,20 +681,20 @@ Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
 	if (_storage->read(location, rec) != EEPROM_StatusTypeDef::OK) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
-	if (!unpackRecord(rec, offset, matrix)) {
+	if (!unpackRecord(rec, offset, matrix, misalign_deg)) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 	return Calibrator_StatusTypeDef::OK;
 }
 
 Calibrator_StatusTypeDef Calibrator::saveRecord(EEPROMLocation location,
-		const Vector3f &offset, const Matrix3f &matrix) {
+		const Vector3f &offset, const Matrix3f &matrix, float misalign_deg) {
 	if (_storage == nullptr) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 
 	CalibrationRecord rec;
-	packRecord(offset, matrix, rec);
+	packRecord(offset, matrix, rec, misalign_deg);
 
 	if (_storage->write(location, rec) != EEPROM_StatusTypeDef::OK) {
 		return Calibrator_StatusTypeDef::ERROR;
@@ -702,7 +714,8 @@ Calibrator_StatusTypeDef Calibrator::saveRecord(EEPROMLocation location,
 }
 
 Calibrator_StatusTypeDef Calibrator::loadAccelCalibrationData() {
-	return loadRecord(EEPROMLocation::ACCLCALIBRATEDAT, _accelOffset, _accelMatrix);
+	return loadRecord(EEPROMLocation::ACCLCALIBRATEDAT, _accelOffset,
+			_accelMatrix, &_accelMisalignDeg);
 }
 
 Calibrator_StatusTypeDef Calibrator::loadCompassCalibrationData() {
@@ -725,7 +738,8 @@ Calibrator_StatusTypeDef Calibrator::saveLevelCalibrationData() {
 }
 
 Calibrator_StatusTypeDef Calibrator::saveAccelCalibrationData() {
-	return saveRecord(EEPROMLocation::ACCLCALIBRATEDAT, _accelOffset, _accelMatrix);
+	return saveRecord(EEPROMLocation::ACCLCALIBRATEDAT, _accelOffset,
+			_accelMatrix, _accelMisalignDeg);
 }
 
 Calibrator_StatusTypeDef Calibrator::saveCompassCalibrationData() {
@@ -737,6 +751,7 @@ Calibrator_StatusTypeDef Calibrator::clearStoredCalibration() {
 	_isAccelCalibrated = false;
 	_isCompassCalibrated = false;
 	_isLevelCalibrated = false;
+	_accelMisalignDeg = -1.0f;
 	_accelOffset = Vector3f();
 	_accelMatrix = Matrix3f::identity();
 	_compassOffset = Vector3f();
