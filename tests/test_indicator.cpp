@@ -103,8 +103,8 @@ int main()
         // Default states: ERROR / DISARMED / UNLOCKED.
         check(renderCycle(ind, t0, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_ERROR,
               "ERROR renders the 100 ms strobe");
-        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == INDICATOR_PAT_OFF,
-              "DISARMED is DARK -- no light means no live props");
+        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_SAFE,
+              "DISARMED renders the calm 800/800 blink");
         check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_SEARCH,
               "UNLOCKED renders the searching double blink");
     }
@@ -119,8 +119,8 @@ int main()
         ind.setSystemState(SystemState::OK);
         ind.setArmState(ArmState::ARMED);
         ind.setGPSState(GPSState::LOCKED);
-        check(renderCycle(ind, 2000, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_OFF,
-              "OK is DARK -- the system LED only ever means trouble");
+        check(renderCycle(ind, 2000, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SOLID,
+              "OK is solid");
         check(renderCycle(ind, 2000, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_LIVE,
               "ARMED is solid -- props live is never a dark LED");
         check(renderCycle(ind, 2000, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_FIX,
@@ -156,13 +156,14 @@ int main()
         ind.init();
         settle(ind, 0);
 
-        // Land mid-cycle on a slot the OK pattern has dark, then switch to
-        // ERROR, whose slot 0 is lit.
+        // Land mid-cycle on a DARK slot of the ERROR strobe, then switch to OK,
+        // which is solid -- so the light has to appear on the very next render
+        // rather than waiting out the rest of the strobe's cycle.
         tickTo(ind, 1550);
-        ind.setSystemState(SystemState::OK);
-        tickTo(ind, 1950);                       // slot 4 of OK: dark
-        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "mid-cycle and dark, as set up");
         ind.setSystemState(SystemState::ERROR);
+        tickTo(ind, 1550 + INDICATOR_SLOT_MS);   // slot 1 of the strobe: dark
+        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "mid-cycle and dark, as set up");
+        ind.setSystemState(SystemState::OK);
         ind.update();
         check(ind.isLit(Indicator::CHANNEL_SYSTEM),
               "a change restarts the cycle and lights slot 0 immediately");
@@ -212,7 +213,7 @@ int main()
         g_stub_tick = 1000;
         ind.setSystemState(SystemState::OK);
         ind.update();
-        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "healthy: the system LED is dark");
+        check(ind.isLit(Indicator::CHANNEL_SYSTEM), "healthy: the system LED is solid");
 
         g_stub_tick = 3000;
         ind.setSystemState(SystemState::ERROR);
@@ -240,33 +241,53 @@ int main()
               "the pattern renders correctly straight through the wrap");
     }
 
-    section("What the dark-resting scheme costs, and what still proves liveness");
+    section("No state is ever dark");
     {
-        // Two of the three channels now rest dark, so a healthy, disarmed
-        // airframe shows almost nothing. Pin what remains.
+        // THE invariant. A dark LED must mean exactly one thing -- dead LED,
+        // wrong pin, wrong active level, hung loop, no power -- so no state may
+        // also render dark. Checked over a whole cycle, because a pattern that
+        // is dark for 15 of 16 slots would still pass a single-sample check.
         Indicator ind { SYS, ARM, GPS };
         g_stub_tick = 0;
         ind.init();
-        const uint32_t t0 = settle(ind, 0);
+        uint32_t t = settle(ind, 0);
 
-        ind.setSystemState(SystemState::OK);
-        ind.setArmState(ArmState::DISARMED);
-        check(renderCycle(ind, t0, Indicator::CHANNEL_SYSTEM) == 0,
-              "healthy + disarmed: the system LED is dark for a whole cycle");
-        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == 0,
-              "... and so is the arm LED");
-
-        // ... but the GPS channel has NO dark state: searching blinks, locked
-        // is solid. So the panel is never completely unlit while the loop runs,
-        // and that LED is the de-facto liveness indicator now that the other
-        // two rest dark. Anything that makes a GPS state dark removes the last
-        // signal that separates "healthy" from "unpowered".
-        ind.setGPSState(GPSState::UNLOCKED);
-        check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) != 0,
-              "UNLOCKED still shows light -- the panel is not fully dark");
-        ind.setGPSState(GPSState::LOCKED);
-        check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_FIX,
-              "and LOCKED is solid, so neither GPS state is ever unlit");
+        struct Case { SystemState sys; ArmState arm; GPSState gps; const char *what; };
+        static const Case cases[] = {
+            { SystemState::OK,    ArmState::DISARMED, GPSState::UNLOCKED, "OK / DISARMED / UNLOCKED" },
+            { SystemState::ERROR, ArmState::ARMED,    GPSState::LOCKED,   "ERROR / ARMED / LOCKED" },
+        };
+        for (const Case &c : cases) {
+            t += 4000u;
+            g_stub_tick = t;
+            ind.setSystemState(c.sys);
+            ind.setArmState(c.arm);
+            ind.setGPSState(c.gps);
+            const bool all_lit =
+                    renderCycle(ind, t, Indicator::CHANNEL_SYSTEM) != 0
+                    && renderCycle(ind, t, Indicator::CHANNEL_ARM) != 0
+                    && renderCycle(ind, t, Indicator::CHANNEL_GPS) != 0;
+            check(all_lit, c.what);
+        }
+    }
+    {
+        // Solid is the good case on every channel, blink is the one wanting
+        // attention. Uniform across all three, so the panel reads without
+        // having to remember which LED means what.
+        check(INDICATOR_PAT_SYS_OK == INDICATOR_PAT_SOLID, "OK is solid");
+        check(INDICATOR_PAT_ARM_LIVE == INDICATOR_PAT_SOLID, "ARMED is solid");
+        check(INDICATOR_PAT_GPS_FIX == INDICATOR_PAT_SOLID, "LOCKED is solid");
+        check(INDICATOR_PAT_SYS_ERROR != INDICATOR_PAT_SOLID
+              && INDICATOR_PAT_SYS_ERROR != INDICATOR_PAT_OFF, "ERROR blinks");
+        check(INDICATOR_PAT_ARM_SAFE != INDICATOR_PAT_SOLID
+              && INDICATOR_PAT_ARM_SAFE != INDICATOR_PAT_OFF, "DISARMED blinks");
+        check(INDICATOR_PAT_GPS_SEARCH != INDICATOR_PAT_SOLID
+              && INDICATOR_PAT_GPS_SEARCH != INDICATOR_PAT_OFF, "UNLOCKED blinks");
+        // Different KINDS of attention, which is free now and awkward later.
+        check(INDICATOR_PAT_SYS_ERROR != INDICATOR_PAT_ARM_SAFE
+              && INDICATOR_PAT_ARM_SAFE != INDICATOR_PAT_GPS_SEARCH
+              && INDICATOR_PAT_SYS_ERROR != INDICATOR_PAT_GPS_SEARCH,
+              "the three blink patterns are distinct from each other");
     }
 
     return testReport("Indicator");
