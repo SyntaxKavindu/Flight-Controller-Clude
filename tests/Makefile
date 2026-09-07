@@ -28,6 +28,7 @@ CAL_SRC   := $(ROOT)/Drone/Calibrators/AccelerometerCalibrator.cpp \
              $(ROOT)/Drone/Calibrators/LevelCalibrator.cpp
 STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
              $(ROOT)/Drone/Globals.cpp $(ROOT)/Drone/Imu/Imu.cpp \
+             $(ROOT)/Drone/Indicator/Indicator.cpp \
              $(ROOT)/Drone/Magnetometer/Magnetometer.cpp \
              $(ROOT)/Drone/Barometer/Barometer.cpp \
              $(ROOT)/Drone/Telemetry/Telemetry.cpp $(ROOT)/Drone/Eeprom/EEPROM.cpp \
@@ -43,8 +44,8 @@ STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
 # only thing that catches that class of rot.
 ALL_SRC := $(shell find $(ROOT)/Drone -name '*.cpp')
 
-.PHONY: all esekf cal integ firmware compileall clean
-all: compileall esekf cal integ firmware
+.PHONY: all esekf cal integ indicator firmware compileall clean
+all: compileall esekf cal integ indicator firmware
 	@echo "=========================================="
 	@echo " all suites passed"
 	@echo "=========================================="
@@ -63,6 +64,14 @@ cal: | $(BUILD)
 integ: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_integ test_integration.cpp $(STACK_SRC)
 	@$(BUILD)/t_integ
+
+# The status panel. Needs the HAL stub for GPIO and the clock, but nothing else
+# from the flight stack -- the class talks to pins and HAL_GetTick() and that is
+# all, which is what keeps it droppable into another project.
+indicator: | $(BUILD)
+	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_ind test_indicator.cpp \
+		$(ROOT)/Drone/Indicator/Indicator.cpp stub/stub.cpp
+	@$(BUILD)/t_ind
 
 # Not a test: a link of the complete flight stack including Drone.cpp, so a
 # change that compiles in isolation but breaks the real build is caught here.

@@ -12,6 +12,15 @@ extern "C" {
 typedef enum { HAL_OK = 0, HAL_ERROR = 1, HAL_BUSY = 2, HAL_TIMEOUT = 3 } HAL_StatusTypeDef;
 typedef enum { GPIO_PIN_RESET = 0, GPIO_PIN_SET = 1 } GPIO_PinState;
 
+/* Same values the real HAL uses: GPIO_PIN_n is 1 << n. stub.cpp relies on that
+   to recover the bit index when it records a write. */
+#define GPIO_PIN_0  ((uint16_t)0x0001)
+#define GPIO_PIN_1  ((uint16_t)0x0002)
+#define GPIO_PIN_2  ((uint16_t)0x0004)
+#define GPIO_PIN_3  ((uint16_t)0x0008)
+#define GPIO_PIN_4  ((uint16_t)0x0010)
+#define GPIO_PIN_5  ((uint16_t)0x0020)
+
 typedef struct { int dummy; } GPIO_TypeDef;
 typedef struct { int dummy; } DMA_HandleTypeDef;
 

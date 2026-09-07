@@ -11,6 +11,33 @@
 #include "Globals.hpp"
 #include "i2c.h"
 
+// ===========================================================================
+// INDICATOR LEDS -- EDIT HERE, AND ONLY HERE
+//
+// !! PLACEHOLDER PINS. Replace the three blocks below with your board's real
+// !! CubeMX user labels, or rename the pins in CubeMX to these names, and the
+// !! #warning underneath will go away by itself.
+//
+// The pattern matches SPI1_CS_GPIO_Port and friends: CubeMX generates
+// <LABEL>_GPIO_Port and <LABEL>_Pin into main.h, and the object is handed them
+// here rather than hardcoding a port inside the class.
+//
+// The third field is ACTIVE HIGH. Set it false for an LED wired to sink into
+// the pin (anode to 3V3), which is the common arrangement -- getting it wrong
+// does not break anything, it inverts every pattern, so "healthy" becomes a
+// near-solid light and "error" a near-dark one. Check it against the lamp test
+// at boot: all three LEDs should be ON for the first 0.7 s.
+// ===========================================================================
+#ifndef LED_SYSTEM_Pin
+#warning "Indicator LEDs are on placeholder pins -- set them in Globals.cpp"
+#define LED_SYSTEM_GPIO_Port GPIOE
+#define LED_SYSTEM_Pin       GPIO_PIN_0
+#define LED_ARM_GPIO_Port    GPIOE
+#define LED_ARM_Pin          GPIO_PIN_1
+#define LED_GPS_GPIO_Port    GPIOE
+#define LED_GPS_Pin          GPIO_PIN_2
+#endif
+
 // Definition order is construction order within this file. None of these
 // constructors touches another object, so the order is not load bearing today
 // -- it is kept dependency-first anyway so it stays obvious if that changes.
@@ -26,9 +53,23 @@ Calibrator calibrator;
 Imu imu;
 Magnetometer magnetometer;
 Barometer barometer;
+Indicator indicator {
+	{ LED_SYSTEM_GPIO_Port, LED_SYSTEM_Pin, true },
+	{ LED_ARM_GPIO_Port,    LED_ARM_Pin,    true },
+	{ LED_GPS_GPIO_Port,    LED_GPS_Pin,    true }
+};
 
 uint8_t Globals_Init(void) {
 	uint8_t status = GLOBALS_INIT_OK;
+
+	// FIRST, before anything that can fail. The lamp test it starts is the only
+	// signal an operator gets from a board whose telemetry never comes up, and a
+	// device probe below is exactly the kind of thing that can hang -- so the
+	// LEDs must already be lit by then, not waiting behind it.
+	//
+	// It cannot fail: a GPIO write has nothing to report, so there is no status
+	// bit for it. What a dead LED looks like is covered by the lamp test.
+	indicator.init();
 
 	// Storage first: the calibrator restores its stored gains from it.
 	if (storage.init() != EEPROM_StatusTypeDef::OK) {
