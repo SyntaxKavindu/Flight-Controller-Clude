@@ -118,9 +118,32 @@
 #define DRONE_MID_LOOP_HZ                50
 #define DRONE_SLOW_LOOP_HZ                1
 
+// Command polling. Gated like everything else, and for a measured reason:
+// telemetry.poll() used to run on EVERY pass, and once -O2 took the loop up to
+// ~178,000 passes per second that was 1.8 us x 178k = 31% OF THE CPU spent
+// discovering an empty ring buffer. Commands arrive at human speed.
+//
+// 1 kHz is chosen against the ring, not against the operator. USB full-speed
+// CDC delivers at most one 64-byte packet per 1 ms frame, and poll() drains the
+// whole ring each time, so at 1 kHz the 256-byte ring can never hold more than
+// a quarter of its capacity -- four frames of margin before a byte could be
+// lost. It also keeps a CANCEL acting within a millisecond, which is the
+// property the ordering below exists to protect.
+#define DRONE_POLL_HZ                  1000
+
+// ... but the time gate alone is not enough. A dead SysTick freezes
+// HAL_GetTick(), so due() would never fire again and the command link would die
+// WITH the clock -- taking DIAG, the one tool for diagnosing exactly that
+// failure, down with it. So poll() also runs unconditionally every this many
+// passes, whatever the clock is doing. At the loop rates seen here that is a
+// poll every ~20 ms even with time stopped, and it costs about 0.02% of the CPU
+// the ungated version was spending.
+#define DRONE_POLL_MAX_SKIP            4096u
+
 #define DRONE_FAST_LOOP_PERIOD_MS        (1000u / DRONE_FAST_LOOP_HZ)
 #define DRONE_MID_LOOP_PERIOD_MS         (1000u / DRONE_MID_LOOP_HZ)
 #define DRONE_SLOW_LOOP_PERIOD_MS        (1000u / DRONE_SLOW_LOOP_HZ)
+#define DRONE_POLL_PERIOD_MS             (1000u / DRONE_POLL_HZ)
 
 static_assert(DRONE_FAST_LOOP_PERIOD_MS >= 1u,
 		"HAL_GetTick() is 1 ms: the fast group cannot be dispatched faster than 1 kHz");
@@ -182,11 +205,10 @@ public:
 	// Brings up the globals and configures the estimator. Call once.
 	void init(void);
 
-	// Call it in a tight while(1). Every group -- fast, mid, publish, slow --
-	// is dispatched off HAL_GetTick() when its period comes due, from a single
-	// tick read per pass so they all share one clock. Passes between due dates
-	// only drain the command link, which is what keeps a CANCEL responsive
-	// without costing a sensor read.
+	// Call it in a tight while(1). Every group -- command polling, fast, mid,
+	// publish, slow -- is dispatched off HAL_GetTick() when its period comes
+	// due, from a single tick read per pass so they all share one clock.
+	// Passes between due dates do nothing but check those gates.
 	void loop(void);
 
 	// Dumps the loop counters and the estimator's health on demand. Answers
@@ -200,6 +222,8 @@ private:
 	uint8_t _bootStatus;        // GlobalsInitStatus bitmask from init()
 	uint32_t _lastPredictTick;  // HAL_GetTick() at the last integrated step
 	uint32_t _lastFastTick;
+	uint32_t _lastPollTick;
+	uint32_t _pollSkipped;      // passes since poll() last ran; see DRONE_POLL_MAX_SKIP
 	uint32_t _lastMidTick;
 	uint32_t _lastSlowTick;
 	uint32_t _lastPublishTick;
@@ -236,6 +260,7 @@ private:
 	// itself is returning early. Those three need opposite responses and are
 	// otherwise indistinguishable from a silent link.
 	uint32_t _loopCount;
+	uint32_t _pollCount;
 	uint32_t _fastCount;
 	uint32_t _midCount;
 	uint32_t _slowCount;
