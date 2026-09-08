@@ -64,7 +64,12 @@ Velocity::Velocity() :
 		_roll_target { 0.0f }, _pitch_target { 0.0f }, _tilt_target { 0.0f },
 		_limits { }, _lean_max { VELOCITY_MAX_LEAN_ANGLE },
 		_accel_up_max { VELOCITY_ACCEL_UP }, _accel_down_max { VELOCITY_ACCEL_DOWN },
-		_hover_throttle { VELOCITY_HOVER_THROTTLE } {
+		_hover_throttle { VELOCITY_HOVER_THROTTLE }, _vert_sat_s { 0.0f } {
+	// The integrator clamp has to cover the LARGER of the two vertical limits.
+	// It is symmetric, so sizing it from `up` alone would bound steady-state
+	// descent trim by the climb limit -- see setVerticalAccelLimits().
+	_pid_d.setIMax((VELOCITY_ACCEL_UP > VELOCITY_ACCEL_DOWN)
+			? VELOCITY_ACCEL_UP : VELOCITY_ACCEL_DOWN);
 }
 
 // ---------------------------------------------------------------------------
@@ -94,6 +99,7 @@ void Velocity::reset(const Vector3f &vel_ned) {
 	_pitch_target = 0.0f;
 	_tilt_target = 0.0f;
 	_limits = VelocityLimits { };
+	_vert_sat_s = 0.0f;
 	_active = true;
 }
 
@@ -162,6 +168,15 @@ void Velocity::update(const Vector3f &vel_ned, float yaw_rad, float dt) {
 	_accel_target = Vector3f(an, ae, ad);
 	computeThrustVector();
 	computeAttitudeTarget(_thrust_vector, yaw_rad, _roll_target, _pitch_target);
+
+	// Counted AFTER computeThrustVector(), which is what sets the throttle
+	// flags. Continuous, not cumulative: a hard climb saturates for a moment
+	// and that means nothing, while the same flag standing for seconds on end
+	// is a hover throttle the loop cannot trim to. See
+	// getVerticalSaturationTime().
+	const bool vert_saturated = _limits.accel_up || _limits.accel_down
+			|| _limits.throttle_upper || _limits.throttle_lower;
+	_vert_sat_s = vert_saturated ? (_vert_sat_s + dt) : 0.0f;
 }
 
 void Velocity::computeThrustVector(void) {
@@ -298,7 +313,6 @@ void Velocity::setMaxLeanAngle(float rad) {
 void Velocity::setVerticalAccelLimits(float up, float down) {
 	if (isfinite(up) && up > 0.0f) {
 		_accel_up_max = up;
-		_pid_d.setIMax(up);
 	}
 	// Downward is capped well short of g. Past it the thrust vector would have
 	// to point DOWN -- the aircraft would need to fly inverted to obey -- and
@@ -307,6 +321,27 @@ void Velocity::setVerticalAccelLimits(float up, float down) {
 		_accel_down_max = (down < VELOCITY_GRAVITY_MSS * VELOCITY_MAX_DOWN_ACCEL_FRAC)
 				? down
 				: VELOCITY_GRAVITY_MSS * VELOCITY_MAX_DOWN_ACCEL_FRAC;
+	}
+
+	// One symmetric clamp for both directions, so it has to cover the larger.
+	// Sized from `up` alone -- as it was -- the integrator could never hold
+	// enough to trim a steady descent when the down limit was the bigger of the
+	// two, and the loop would quietly settle short of its own limit.
+	_pid_d.setIMax((_accel_up_max > _accel_down_max) ? _accel_up_max : _accel_down_max);
+}
+
+void Velocity::getThrottleRange(float &lo, float &hi) const {
+	// Level and steady, magnitude is |a_d - g| = g - a_d, so the extremes of
+	// a_d give the extremes of the throttle. a_d is NEGATIVE climbing.
+	lo = _hover_throttle * (VELOCITY_GRAVITY_MSS - _accel_down_max)
+			/ VELOCITY_GRAVITY_MSS;
+	hi = _hover_throttle * (VELOCITY_GRAVITY_MSS + _accel_up_max)
+			/ VELOCITY_GRAVITY_MSS;
+	if (lo < 0.0f) {
+		lo = 0.0f;
+	}
+	if (hi > 1.0f) {
+		hi = 1.0f;
 	}
 }
 

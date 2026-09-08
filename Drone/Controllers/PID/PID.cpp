@@ -36,7 +36,7 @@ PID::PID(float kp, float ki, float kd, float kff, float imax, float filt_d_hz) :
 		_target { 0.0f }, _error { 0.0f }, _measurement { 0.0f },
 		_derivative { 0.0f }, _integrator { 0.0f }, _p_out { 0.0f },
 		_d_out { 0.0f }, _ff_out { 0.0f }, _output { 0.0f },
-		_saturated { false }, _reset_filters { true } {
+		_saturated { false }, _rejected { 0u }, _reset_filters { true } {
 }
 
 // First-order low-pass, as the discrete form of a single RC pole:
@@ -63,6 +63,10 @@ void PID::reset(void) {
 	_ff_out = 0.0f;
 	_output = 0.0f;
 	_saturated = false;
+	// Cleared here rather than kept for the life of the object: reset() marks
+	// the loop being (re-)engaged, and a count carried across an arm would
+	// report a fault from a previous flight as if it were current.
+	_rejected = 0u;
 	_reset_filters = true;
 }
 
@@ -137,6 +141,7 @@ float PID::update(float target, float measurement, float dt, bool limit) {
 	// A NaN reaching the integrator is permanent: every later output is NaN
 	// and no amount of good input recovers it. Refuse the sample instead.
 	if (!isValid(target) || !isValid(measurement) || !isValid(dt) || dt <= 0.0f) {
+		_rejected++;
 		return _output;
 	}
 
@@ -174,6 +179,7 @@ float PID::update(float target, float measurement, float dt, bool limit) {
 
 float PID::updateError(float error, float dt, bool limit) {
 	if (!isValid(error) || !isValid(dt) || dt <= 0.0f) {
+		_rejected++;
 		return _output;
 	}
 

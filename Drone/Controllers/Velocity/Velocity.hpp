@@ -177,7 +177,11 @@ public:
 	Vector3f getThrustVector(void) const { return _thrust_vector; }
 
 	// Collective for Motors, 0..1.
-	float getThrottle(void) const { return _throttle; }
+	// Zero until reset() engages the loop. NOT the hover value: a caller that
+	// forgets to engage this controller must read "no thrust", not "hover" --
+	// the second is a number that flies, and it would be produced by a loop
+	// that has never seen a velocity estimate.
+	float getThrottle(void) const { return _active ? _throttle : 0.0f; }
 
 	// The same attitude as the thrust vector, as ZYX Euler angles about the
 	// current heading. For telemetry, for a controller that wants angles, and
@@ -218,6 +222,31 @@ public:
 
 	// Read-only, for a tuning telemetry line. Seeing which term is doing the
 	// work is the difference between tuning and guessing.
+	// The band of steady throttle this loop can actually hold.
+	//
+	// Throttle is hover * |a_d - g| / g and a_d is bounded by the vertical
+	// accel limits, so the reachable steady throttle is
+	//
+	//     hover * (g - accel_down)/g  ..  hover * (g + accel_up)/g
+	//
+	// With the defaults that is only about +/-25% around the hover value. If
+	// the airframe's TRUE hover throttle falls outside this band, the vertical
+	// loop pins against its limit and altitude hold can never converge -- the
+	// aircraft climbs or sinks at the limit for as long as it is in that mode.
+	// Nothing in flight can discover the true value, so check this against the
+	// throttle the airframe actually hovers at before trusting altitude hold.
+	void getThrottleRange(float &lo, float &hi) const;
+
+	// Seconds the vertical axis has been CONTINUOUSLY saturated -- either accel
+	// limit, or throttle on a stop. Reset to zero by any cycle that is not.
+	//
+	// A moment of this is normal and means nothing: every hard climb starts by
+	// saturating. What it cannot do is persist. Sustained saturation while the
+	// climb demand is small is the signature of a hover throttle set wrong, and
+	// it is the only symptom that failure has -- the loop looks healthy, every
+	// output is finite, and the aircraft simply will not stop climbing.
+	float getVerticalSaturationTime(void) const { return _vert_sat_s; }
+
 	const PID &getNorthPID(void) const { return _pid_n; }
 	const PID &getEastPID(void) const { return _pid_e; }
 	const PID &getVerticalPID(void) const { return _pid_d; }
@@ -258,6 +287,9 @@ private:
 	float _accel_up_max;
 	float _accel_down_max;
 	float _hover_throttle;
+
+	// See getVerticalSaturationTime().
+	float _vert_sat_s;
 };
 
 #endif /* CONTROLLERS_VELOCITY_VELOCITY_HPP_ */

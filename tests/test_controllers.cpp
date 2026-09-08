@@ -387,76 +387,102 @@ int main()
             vz -= accel * dt;                                          // NED: up is -z
             vz = clampf(vz, -20.0f, 20.0f);
         }
-        std::printf("        (settled throttle %.3f, climb rate %.2f m/s)\n",
-                    (double)vel.getThrottle(), (double)-vz);
+        std::printf("        (settled throttle %.3f, climb rate %.2f m/s, saturated %.1f s)\n",
+                    (double)vel.getThrottle(), (double)-vz,
+                    (double)vel.getVerticalSaturationTime());
         check(std::fabs(vz) > 0.5f,
               "a hover throttle set 67% above the truth cannot be trimmed out");
         check(vel.getLimits().accel_up || vel.getLimits().accel_down,
               "and the loop reports the accel limit it is pinned against");
+
+        // The failure is unchanged -- the physics does not care -- but it is
+        // no longer SILENT. Sustained saturation is the only symptom this has.
+        check(vel.getVerticalSaturationTime() > 5.0f,
+              "and sustained saturation makes the untrimmable case detectable");
+
+        // The band that could have been checked on the bench beforehand.
+        float lo = 0.0f, hi = 0.0f;
+        vel.getThrottleRange(lo, hi);
+        std::printf("        (reachable steady throttle %.3f .. %.3f)\n",
+                    (double)lo, (double)hi);
+        check(0.30f < lo, "0.30 really is outside the reachable band");
+        checkNear(lo, 0.5f * (G - VELOCITY_ACCEL_DOWN) / G, 1e-4f,
+                  "the lower bound is hover * (g - accel_down) / g");
+        checkNear(hi, 0.5f * (G + VELOCITY_ACCEL_UP) / G, 1e-4f,
+                  "the upper bound is hover * (g + accel_up) / g");
     }
 
     // =====================================================================
-    section("Known weaknesses -- pinned so they cannot regress unnoticed");
+    section("The three defences added after the first review");
     // =====================================================================
     {
-        // A dead sensor feeding NaN makes update() hold its LAST output for
-        // ever. That is the right choice -- a NaN in the integrator is
-        // permanent -- but it is SILENT: there is no counter and no flag, so
-        // nothing downstream can tell a frozen loop from a healthy one that
-        // happens to be commanding that value. Compare ESEKF::getFaultCount().
+        // 1. A frozen loop is no longer indistinguishable from a healthy one.
+        //    Holding the last output on bad input is still right; what was
+        //    missing was any evidence it had happened.
         PID p(1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
         const float last = p.update(1.0f, 0.0f, dt);
+        check(p.getRejectedCount() == 0, "a healthy loop rejects nothing");
+
         const float nan = std::nanf("");
         for (int i = 0; i < 1000; i++) p.update(nan, nan, dt);
-        checkNear(p.getOutput(), last, 1e-6f, "a permanently dead input freezes the output");
-        check(std::isfinite(p.getOutput()), "... finitely, which is the important half");
-        // Nothing here can assert the absence of a counter; this records that
-        // the frozen state is indistinguishable from a live one.
+        checkNear(p.getOutput(), last, 1e-6f, "a dead input still freezes the output");
+        check(p.getRejectedCount() == 1000, "... and every refused sample is now counted");
+
+        p.updateError(nan, dt);
+        check(p.getRejectedCount() == 1001, "updateError() counts them too");
+        p.update(1.0f, 0.0f, 0.0f);
+        check(p.getRejectedCount() == 1002, "and so does a zero dt");
+
+        p.reset();
+        check(p.getRejectedCount() == 0,
+              "reset() clears it -- a fault from a previous arm is not current");
     }
     {
-        // Velocity has no safe idle. Constructed but never reset(), update()
-        // returns early and getThrottle() reports the HOVER value -- so a
-        // caller that forgets reset() reads 50% throttle rather than zero.
-        // Position, by contrast, idles at a zero velocity target.
+        // 2. Velocity now idles at zero thrust, matching Position. A caller
+        //    that forgets reset() must read "no thrust", not a number that
+        //    flies.
         Velocity vel;
         check(!vel.isActive(), "a fresh Velocity is inactive");
-        checkNear(vel.getThrottle(), VELOCITY_HOVER_THROTTLE, 1e-6f,
-                  "but it still reports HOVER throttle, not zero");
+        checkNear(vel.getThrottle(), 0.0f, 1e-6f, "and idles at ZERO throttle");
         Position pos;
-        check(!pos.isActive(), "a fresh Position is inactive");
         checkNear(pos.getVelocityTarget().length(), 0.0f, 1e-6f,
-                  "and it idles at zero -- the two disagree about safe defaults");
+                  "matching Position, which always did");
+
+        vel.reset(Vector3f(0, 0, 0));
+        checkNear(vel.getThrottle(), VELOCITY_HOVER_THROTTLE, 1e-6f,
+                  "engaging it produces the hover value, as before");
     }
     {
-        // setVerticalAccelLimits() takes asymmetric up/down limits but the
-        // integrator clamp behind them is symmetric, and only `up` is used for
-        // it. Ask for a fast descent and the integrator still cannot hold
-        // enough to command it.
+        // 3. The integrator clamp covers BOTH vertical limits, so steady-state
+        //    descent trim is no longer bounded by the climb limit.
         Velocity vel;
         vel.reset(Vector3f(0, 0, 0));
         vel.setVerticalAccelLimits(1.0f, 5.0f);
-        checkNear(vel.getAccelUpLimit(), 1.0f, 1e-6f, "the up limit is taken");
-        checkNear(vel.getAccelDownLimit(), 5.0f, 1e-6f, "and so is the down limit");
-        // PEAK descent is fine -- with a large error the P term alone exceeds
-        // the limit, so the clamp binds, not the integrator.
+        checkNear(vel.getVerticalPID().getIMax(), 5.0f, 1e-6f,
+                  "iMax follows the LARGER of up and down");
+        vel.setVerticalAccelLimits(4.0f, 1.0f);
+        checkNear(vel.getVerticalPID().getIMax(), 4.0f, 1e-6f, "... either way round");
+
+        // Peak descent still reaches the down limit -- P carries that, and did
+        // before. This is the part that was already fine.
+        vel.setVerticalAccelLimits(1.0f, 5.0f);
         vel.setVelocityTarget(Vector3f(0, 0, 5.0f));
         for (int i = 0; i < 8000; i++) vel.update(Vector3f(0, 0, 0), 0.0f, dt);
-        checkNear(vel.getAccelTarget().z, 5.0f, 1e-3f,
-                  "peak descent accel does reach the down limit -- P carries it");
+        checkNear(vel.getAccelTarget().z, 5.0f, 1e-3f, "peak descent still reaches its limit");
+    }
+    {
+        // The saturation timer must be CONTINUOUS, not cumulative: a moment of
+        // saturation is normal and must not accumulate into a false report.
+        Velocity vel;
+        vel.reset(Vector3f(0, 0, 0));
+        vel.setVelocityTarget(Vector3f(0, 0, -10.0f));          // hard climb
+        for (int i = 0; i < 400; i++) vel.update(Vector3f(0, 0, 0), 0.0f, dt);
+        check(vel.getVerticalSaturationTime() > 0.5f, "a hard climb does saturate");
 
-        // What is actually capped is the INTEGRATOR, and only in the descent
-        // direction: setVerticalAccelLimits() passes `up` to setIMax() and
-        // ignores `down`. So the accel the loop can hold in STEADY state --
-        // once the error has gone and only I is left -- is the up limit,
-        // whatever the down limit says. That is trim authority against a
-        // wrong hover throttle, which is the failure above.
-        const float i_held = vel.getVerticalPID().getI();
-        std::printf("        (down limit 5.0, iMax follows up = 1.0, integrator = %.3f)\n",
-                    (double)i_held);
-        check(i_held <= 1.0f + 1e-4f,
-              "the integrator is clamped at the UP limit even descending");
-        check(vel.getVerticalPID().getIMax() < 5.0f,
-              "so steady-state descent trim is bounded by `up`, not `down`");
+        vel.setVelocityTarget(Vector3f(0, 0, 0));               // demand removed
+        for (int i = 0; i < 2000; i++) vel.update(Vector3f(0, 0, 0), 0.0f, dt);
+        checkNear(vel.getVerticalSaturationTime(), 0.0f, 1e-6f,
+                  "and one unsaturated cycle clears the clock");
     }
 
     return testReport("Controllers");
