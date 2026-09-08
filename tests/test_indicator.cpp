@@ -14,11 +14,12 @@
 
 namespace {
 
-// Distinct pins so the stub can record all three independently, and one spare
-// for the active-low channel.
-const IndicatorLed SYS { GPIOE, GPIO_PIN_0, true };
-const IndicatorLed ARM { GPIOE, GPIO_PIN_1, true };
-const IndicatorLed GPS { GPIOE, GPIO_PIN_2, true };
+// The board's real pins (PC13/PC15/PC14, via main.h), so the suite exercises
+// the same wiring the firmware does rather than an invented one. The stub
+// records levels by pin bit, and these three are distinct.
+const IndicatorLed SYS { SYSTEM_GPIO_Port, SYSTEM_Pin, true };
+const IndicatorLed ARM { ARM_GPIO_Port,    ARM_Pin,    true };
+const IndicatorLed GPS { GPS_GPIO_Port,    GPS_Pin,    true };
 
 // Advance the clock and render. update() derives its slot from the clock rather
 // than counting calls, so one call per step is enough.
@@ -199,7 +200,7 @@ int main()
     {
         // Getting this wrong does not break anything -- it silently inverts
         // every pattern, so "healthy" becomes a near-solid light.
-        const IndicatorLed low { GPIOE, GPIO_PIN_3, false };
+        const IndicatorLed low { GPIOC, GPIO_PIN_6, false };
         Indicator ind { low, ARM, GPS };
         g_stub_tick = 0;
         ind.init();
@@ -220,11 +221,11 @@ int main()
         ind.update();   // slot 0 of the ERROR strobe: lit
 
         check(ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports lit");
-        check(stubGpioLevel(GPIO_PIN_3) == GPIO_PIN_RESET,
+        check(stubGpioLevel(GPIO_PIN_6) == GPIO_PIN_RESET,
               "... and an active-low LED is driven LOW to light it");
         tickTo(ind, 3000 + INDICATOR_SLOT_MS);   // slot 1 of the strobe: dark
         check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports dark");
-        check(stubGpioLevel(GPIO_PIN_3) == GPIO_PIN_SET, "... and is driven HIGH");
+        check(stubGpioLevel(GPIO_PIN_6) == GPIO_PIN_SET, "... and is driven HIGH");
     }
 
     section("The clock wrap is survivable");

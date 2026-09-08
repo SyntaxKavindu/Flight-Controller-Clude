@@ -10,17 +10,16 @@
 
 #include "Globals.hpp"
 #include "i2c.h"
+#include "main.h"   // SYSTEM_*/ARM_*/GPS_* pin labels, from CubeMX
 
 // ===========================================================================
 // INDICATOR LEDS -- EDIT HERE, AND ONLY HERE
 //
-// !! PLACEHOLDER PINS. Replace the three blocks below with your board's real
-// !! CubeMX user labels, or rename the pins in CubeMX to these names, and the
-// !! #warning underneath will go away by itself.
-//
-// The pattern matches SPI1_CS_GPIO_Port and friends: CubeMX generates
-// <LABEL>_GPIO_Port and <LABEL>_Pin into main.h, and the object is handed them
-// here rather than hardcoding a port inside the class.
+// The pins come from main.h, the same way SPI1_CS_GPIO_Port and friends do:
+// CubeMX generates <LABEL>_GPIO_Port and <LABEL>_Pin from the user labels set
+// on the pinout, and the object is handed them here rather than any port being
+// hardcoded inside the class. Rename a pin in CubeMX and this is the one place
+// that has to follow.
 //
 // The third field is ACTIVE HIGH. Set it false for an LED wired to sink into
 // the pin (anode to 3V3), which is the common arrangement. Getting it wrong
@@ -31,16 +30,19 @@
 // The lamp test is the check: all three LEDs should be ON for the first 0.7 s
 // after power-up. If they are OFF for 0.7 s and light up afterwards, this
 // field is wrong on all three.
+//
+// !! PC13, PC14 and PC15 are BACKUP-DOMAIN pins, and they are not ordinary
+// !! GPIOs. Two things to check against the datasheet and your schematic:
+// !!
+// !!   - Their output drive is limited compared with a normal pin. An LED sized
+// !!     for a 10-20 mA direct drive is very likely out of spec here; it will
+// !!     look dim rather than fail outright, which is the kind of wrong that
+// !!     gets accepted. Use a high-value resistor with a low-current LED, or
+// !!     drive through a transistor.
+// !!   - PC14 and PC15 are OSC32_IN/OSC32_OUT. They are only free as GPIO
+// !!     because the LSE crystal is not enabled. Turning the LSE on later --
+// !!     for an RTC, say -- takes the ARM and GPS LEDs with it.
 // ===========================================================================
-#ifndef LED_SYSTEM_Pin
-#warning "Indicator LEDs are on placeholder pins -- set them in Globals.cpp"
-#define LED_SYSTEM_GPIO_Port GPIOE
-#define LED_SYSTEM_Pin       GPIO_PIN_0
-#define LED_ARM_GPIO_Port    GPIOE
-#define LED_ARM_Pin          GPIO_PIN_1
-#define LED_GPS_GPIO_Port    GPIOE
-#define LED_GPS_Pin          GPIO_PIN_2
-#endif
 
 // Definition order is construction order within this file. None of these
 // constructors touches another object, so the order is not load bearing today
@@ -58,9 +60,9 @@ Imu imu;
 Magnetometer magnetometer;
 Barometer barometer;
 Indicator indicator {
-	{ LED_SYSTEM_GPIO_Port, LED_SYSTEM_Pin, true },
-	{ LED_ARM_GPIO_Port,    LED_ARM_Pin,    true },
-	{ LED_GPS_GPIO_Port,    LED_GPS_Pin,    true }
+	{ SYSTEM_GPIO_Port, SYSTEM_Pin, true },   // PC13
+	{ ARM_GPIO_Port,    ARM_Pin,    true },   // PC15
+	{ GPS_GPIO_Port,    GPS_Pin,    true }    // PC14
 };
 
 uint8_t Globals_Init(void) {

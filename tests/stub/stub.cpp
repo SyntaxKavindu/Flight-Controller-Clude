@@ -12,11 +12,13 @@
 #include "spi.h"
 #include "i2c.h"
 
-static GPIO_TypeDef g_port;
-GPIO_TypeDef *const SPI1_CS_GPIO_Port = &g_port;
-GPIO_TypeDef *const SPI2_CS_GPIO_Port = &g_port;
-GPIO_TypeDef *const SPI3_CS_GPIO_Port = &g_port;
-GPIO_TypeDef *const GPIOE = &g_port;
+// Distinct objects so a port mix-up is at least visible in a debugger, though
+// HAL_GPIO_WritePin() here records by pin bit alone -- see the note there.
+static GPIO_TypeDef g_gpioa, g_gpiob, g_gpioc, g_gpiod;
+GPIO_TypeDef *const GPIOA = &g_gpioa;
+GPIO_TypeDef *const GPIOB = &g_gpiob;
+GPIO_TypeDef *const GPIOC = &g_gpioc;
+GPIO_TypeDef *const GPIOD = &g_gpiod;
 SPI_HandleTypeDef hspi1, hspi2, hspi3;
 I2C_HandleTypeDef hi2c1, hi2c3;
 

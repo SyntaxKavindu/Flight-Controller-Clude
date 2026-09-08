@@ -1,25 +1,26 @@
 #ifndef STUB_MAIN_H
 #define STUB_MAIN_H
 #include "stm32f7xx_hal.h"
-extern GPIO_TypeDef *const SPI1_CS_GPIO_Port;
-extern GPIO_TypeDef *const SPI2_CS_GPIO_Port;
-extern GPIO_TypeDef *const SPI3_CS_GPIO_Port;
-#define SPI1_CS_Pin 1u
-#define SPI2_CS_Pin 2u
-#define SPI3_CS_Pin 4u
+/* Mirrors the board's generated main.h, so the host build sees the same labels,
+   ports and pin bits the firmware does. Kept in step by hand -- if a pin moves
+   in CubeMX, move it here too, or a mismatch will only show up on hardware. */
+extern GPIO_TypeDef *const GPIOA;
+extern GPIO_TypeDef *const GPIOB;
+extern GPIO_TypeDef *const GPIOC;
+extern GPIO_TypeDef *const GPIOD;
 
-/* The indicator LEDs. Defined here so the host build takes the same path a
-   configured board does -- Globals.cpp only falls back to placeholder pins (and
-   its #warning) when these are absent, which is exactly the state a real
-   firmware build is in until the pins are set. Distinct bits, because stub.cpp
-   records levels per pin. */
-extern GPIO_TypeDef *const GPIOE;
-#define LED_SYSTEM_GPIO_Port GPIOE
-#define LED_SYSTEM_Pin       GPIO_PIN_3
-#define LED_ARM_GPIO_Port    GPIOE
-#define LED_ARM_Pin          GPIO_PIN_4
-#define LED_GPS_GPIO_Port    GPIOE
-#define LED_GPS_Pin          GPIO_PIN_5
+#define SYSTEM_Pin        GPIO_PIN_13
+#define SYSTEM_GPIO_Port  GPIOC
+#define GPS_Pin           GPIO_PIN_14
+#define GPS_GPIO_Port     GPIOC
+#define ARM_Pin           GPIO_PIN_15
+#define ARM_GPIO_Port     GPIOC
+#define SPI1_CS_Pin       GPIO_PIN_2
+#define SPI1_CS_GPIO_Port GPIOD
+#define SPI2_CS_Pin       GPIO_PIN_12
+#define SPI2_CS_GPIO_Port GPIOB
+#define SPI3_CS_Pin       GPIO_PIN_15
+#define SPI3_CS_GPIO_Port GPIOA
 
 /* Test hooks. HAL_GetTick() returns g_stub_tick, which starts at 0 -- the same
    value it used to return unconditionally, so every existing suite is
