@@ -13,12 +13,14 @@ cd tests && make
 | `make cal`   | The three calibration engines, driven directly |
 | `make integ` | The `Calibrator` facade, the sensor frontends, the EEPROM record |
 | `make indicator` | The status panel: pattern rendering, lamp test, phase handling, GPIO write suppression |
+| `make ctrl` | `PID`, `Position`, `Velocity`: control law, limits, degeneracy, bad input |
 | `make firmware` | Links the whole stack including `Drone.cpp` and runs `loop()` |
 
 `make cal` links **only** `AccelerometerCalibrator`, `CompassCalibrator` and
 `LevelCalibrator` — no facade, no HAL, no `stub/`. If that link ever starts
 needing `stub/`, a board dependency has crept back into a class that is meant to
-be portable.
+be portable. `make ctrl` links no `stub/` either, for the same reason: the
+control law takes `dt` as a parameter and touches no peripheral.
 
 ## What these do and do not prove
 
