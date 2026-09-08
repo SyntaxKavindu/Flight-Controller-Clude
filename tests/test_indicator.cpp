@@ -29,15 +29,26 @@ void tickTo(Indicator &ind, uint32_t ms)
     ind.update();
 }
 
+// Whether a channel is lit, read from the PIN the class actually drove. The
+// class exposes nothing for this on purpose -- watching the GPIO is the honest
+// seam anyway, since it is what an LED is wired to, and it catches an active
+// level applied backwards where an internal "is it lit" flag could not.
+bool litNow(uint16_t pin, bool active_high = true)
+{
+    const GPIO_PinState level = stubGpioLevel(pin);
+    return active_high ? (level == GPIO_PIN_SET) : (level == GPIO_PIN_RESET);
+}
+
 // Render one whole 16-slot cycle starting at `base`, sampling the middle of
 // each slot so a boundary rounding error cannot be mistaken for a pattern bug.
 // Returns the rendered bits, LSB = slot 0 -- the same encoding as the pattern.
-uint16_t renderCycle(Indicator &ind, uint32_t base, Indicator::Channel ch)
+uint16_t renderCycle(Indicator &ind, uint32_t base, uint16_t pin,
+                     bool active_high = true)
 {
     uint16_t got = 0;
     for (uint16_t s = 0; s < INDICATOR_SLOTS; s++) {
         tickTo(ind, base + s * INDICATOR_SLOT_MS + INDICATOR_SLOT_MS / 2u);
-        if (ind.isLit(ch)) got = (uint16_t)(got | (uint16_t)(1u << s));
+        if (litNow(pin, active_high)) got = (uint16_t)(got | (uint16_t)(1u << s));
     }
     return got;
 }
@@ -81,17 +92,26 @@ int main()
         Indicator ind { SYS, ARM, GPS };
         g_stub_tick = 1000;
         ind.init();
-        check(ind.inLampTest(), "init() starts the lamp test");
-        check(ind.isLit(Indicator::CHANNEL_SYSTEM)
-              && ind.isLit(Indicator::CHANNEL_ARM)
-              && ind.isLit(Indicator::CHANNEL_GPS), "all three light immediately");
+        check(litNow(SYSTEM_Pin) && litNow(ARM_Pin) && litNow(GPS_Pin),
+              "all three light immediately, before update() is ever called");
+
+        // 300 ms in. Were the ERROR strobe already running this would be slot 3
+        // and dark, so staying lit is what proves the lamp test overrides the
+        // pattern rather than merely coinciding with it.
+        tickTo(ind, 1000 + 3u * INDICATOR_SLOT_MS);
+        check(litNow(SYSTEM_Pin), "the lamp test overrides the pattern while it runs");
 
         tickTo(ind, 1000 + INDICATOR_LAMP_TEST_MS - 1);
-        check(ind.inLampTest(), "still lit one millisecond before the end");
-        check(ind.isLit(Indicator::CHANNEL_GPS), "... and really still lit");
+        check(litNow(SYSTEM_Pin) && litNow(ARM_Pin) && litNow(GPS_Pin),
+              "still lit one millisecond before the end");
 
+        // Patterns start at the instant the lamp test ends, and every one of
+        // them has slot 0 lit -- so the end is invisible AT the boundary and
+        // has to be read one slot later, where the strobe goes dark.
         tickTo(ind, 1000 + INDICATOR_LAMP_TEST_MS);
-        check(!ind.inLampTest(), "and ends exactly on time");
+        check(litNow(SYSTEM_Pin), "slot 0 of every pattern is lit, so the handover is seamless");
+        tickTo(ind, 1000 + INDICATOR_LAMP_TEST_MS + INDICATOR_SLOT_MS);
+        check(!litNow(SYSTEM_Pin), "and one slot later the strobe is running: the test ended");
     }
 
     section("Patterns render as documented");
@@ -102,11 +122,11 @@ int main()
         const uint32_t t0 = settle(ind, 0);
 
         // Default states: ERROR / DISARMED / UNLOCKED.
-        check(renderCycle(ind, t0, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_ERROR,
+        check(renderCycle(ind, t0, SYSTEM_Pin) == INDICATOR_PAT_SYS_ERROR,
               "ERROR renders the 100 ms strobe");
-        check(renderCycle(ind, t0, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_SAFE,
+        check(renderCycle(ind, t0, ARM_Pin) == INDICATOR_PAT_ARM_SAFE,
               "DISARMED renders the calm 800/800 blink");
-        check(renderCycle(ind, t0, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_SEARCH,
+        check(renderCycle(ind, t0, GPS_Pin) == INDICATOR_PAT_GPS_SEARCH,
               "UNLOCKED renders the searching double blink");
     }
     {
@@ -120,11 +140,11 @@ int main()
         ind.setSystemState(SystemState::OK);
         ind.setArmState(ArmState::ARMED);
         ind.setGPSState(GPSState::LOCKED);
-        check(renderCycle(ind, 2000, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SOLID,
+        check(renderCycle(ind, 2000, SYSTEM_Pin) == INDICATOR_PAT_SOLID,
               "OK is solid");
-        check(renderCycle(ind, 2000, Indicator::CHANNEL_ARM) == INDICATOR_PAT_ARM_LIVE,
+        check(renderCycle(ind, 2000, ARM_Pin) == INDICATOR_PAT_ARM_LIVE,
               "ARMED is solid -- props live is never a dark LED");
-        check(renderCycle(ind, 2000, Indicator::CHANNEL_GPS) == INDICATOR_PAT_GPS_FIX,
+        check(renderCycle(ind, 2000, GPS_Pin) == INDICATOR_PAT_GPS_FIX,
               "LOCKED is solid");
     }
 
@@ -144,7 +164,7 @@ int main()
         for (uint16_t s = 0; s < INDICATOR_SLOTS; s++) {
             ind.setSystemState(SystemState::ERROR);   // same state, every pass
             tickTo(ind, t0 + s * INDICATOR_SLOT_MS + INDICATOR_SLOT_MS / 2u);
-            if (ind.isLit(Indicator::CHANNEL_SYSTEM)) got = (uint16_t)(got | (uint16_t)(1u << s));
+            if (litNow(SYSTEM_Pin)) got = (uint16_t)(got | (uint16_t)(1u << s));
         }
         check(got == INDICATOR_PAT_SYS_ERROR,
               "re-pushing an unchanged state does not pin the pattern to slot 0");
@@ -163,10 +183,10 @@ int main()
         tickTo(ind, 1550);
         ind.setSystemState(SystemState::ERROR);
         tickTo(ind, 1550 + INDICATOR_SLOT_MS);   // slot 1 of the strobe: dark
-        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "mid-cycle and dark, as set up");
+        check(!litNow(SYSTEM_Pin), "mid-cycle and dark, as set up");
         ind.setSystemState(SystemState::OK);
         ind.update();
-        check(ind.isLit(Indicator::CHANNEL_SYSTEM),
+        check(litNow(SYSTEM_Pin),
               "a change restarts the cycle and lights slot 0 immediately");
     }
 
@@ -214,17 +234,17 @@ int main()
         g_stub_tick = 1000;
         ind.setSystemState(SystemState::OK);
         ind.update();
-        check(ind.isLit(Indicator::CHANNEL_SYSTEM), "healthy: the system LED is solid");
+        check(litNow(GPIO_PIN_6, false), "healthy: the system LED is solid");
 
         g_stub_tick = 3000;
         ind.setSystemState(SystemState::ERROR);
         ind.update();   // slot 0 of the ERROR strobe: lit
 
-        check(ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports lit");
+        check(litNow(GPIO_PIN_6, false), "the channel is lit");
         check(stubGpioLevel(GPIO_PIN_6) == GPIO_PIN_RESET,
               "... and an active-low LED is driven LOW to light it");
         tickTo(ind, 3000 + INDICATOR_SLOT_MS);   // slot 1 of the strobe: dark
-        check(!ind.isLit(Indicator::CHANNEL_SYSTEM), "the channel reports dark");
+        check(!litNow(GPIO_PIN_6, false), "the channel is dark");
         check(stubGpioLevel(GPIO_PIN_6) == GPIO_PIN_SET, "... and is driven HIGH");
     }
 
@@ -238,7 +258,7 @@ int main()
         ind.init();
         settle(ind, 0xFFFFFF00u);
         const uint32_t base = 0xFFFFFF00u + INDICATOR_LAMP_TEST_MS;  // wraps
-        check(renderCycle(ind, base, Indicator::CHANNEL_SYSTEM) == INDICATOR_PAT_SYS_ERROR,
+        check(renderCycle(ind, base, SYSTEM_Pin) == INDICATOR_PAT_SYS_ERROR,
               "the pattern renders correctly straight through the wrap");
     }
 
@@ -265,9 +285,9 @@ int main()
             ind.setArmState(c.arm);
             ind.setGPSState(c.gps);
             const bool all_lit =
-                    renderCycle(ind, t, Indicator::CHANNEL_SYSTEM) != 0
-                    && renderCycle(ind, t, Indicator::CHANNEL_ARM) != 0
-                    && renderCycle(ind, t, Indicator::CHANNEL_GPS) != 0;
+                    renderCycle(ind, t, SYSTEM_Pin) != 0
+                    && renderCycle(ind, t, ARM_Pin) != 0
+                    && renderCycle(ind, t, GPS_Pin) != 0;
             check(all_lit, c.what);
         }
     }

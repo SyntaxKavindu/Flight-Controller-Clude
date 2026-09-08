@@ -125,13 +125,3 @@ void Indicator::setGPSState(GPSState state) {
 	setPattern(CHANNEL_GPS, (state == GPSState::LOCKED)
 			? INDICATOR_PAT_GPS_FIX : INDICATOR_PAT_GPS_SEARCH);
 }
-
-bool Indicator::isLit(Channel ch) const {
-	if (ch >= CHANNEL_COUNT) {
-		return false;
-	}
-	if (_lampTest) {
-		return true;
-	}
-	return _out[ch].written == 1;
-}

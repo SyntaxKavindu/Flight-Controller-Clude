@@ -696,18 +696,15 @@ void Drone::reportDiagnostics(void) {
 	// every sample-count gate in AccelerometerCalibrator and LevelCalibrator is
 	// then running at a fraction of its documented time -- which shows up as a
 	// tumble that reports STALLED partway through a good run.
-	// The status panel, as the operator should be seeing it. Worth reporting
-	// because the LEDs are the one output that cannot be read back over the
-	// link: a dark panel is either "healthy, mid-pattern" or "wrong pin", and
-	// this line is what tells the two apart without a multimeter.
-	telemetry.send("$DIAG,LED sys=%s arm=%s gps=%s lit=%u%u%u test=%u",
+	// What the panel is being TOLD, which is the half worth reporting: it says
+	// whether the states reaching the indicator are the ones expected, so a
+	// wrong-looking LED can be blamed on the wiring or on the state feeding it.
+	// The instantaneous lit/dark of each LED is deliberately not here -- it is
+	// a snapshot of one 100 ms slot, so it says nothing on its own.
+	telemetry.send("$DIAG,LED sys=%s arm=%s gps=%s",
 			indicator.getSystemState() == SystemState::OK ? "OK" : "ERR",
 			indicator.getArmState() == ArmState::ARMED ? "ARMED" : "SAFE",
-			indicator.getGPSState() == GPSState::LOCKED ? "FIX" : "SEARCH",
-			(unsigned) (indicator.isLit(Indicator::CHANNEL_SYSTEM) ? 1 : 0),
-			(unsigned) (indicator.isLit(Indicator::CHANNEL_ARM) ? 1 : 0),
-			(unsigned) (indicator.isLit(Indicator::CHANNEL_GPS) ? 1 : 0),
-			(unsigned) (indicator.inLampTest() ? 1 : 0));
+			indicator.getGPSState() == GPSState::LOCKED ? "FIX" : "SEARCH");
 
 	telemetry.send("$DIAG,CALFEED div=%u hz=%u",
 			(unsigned) calibrator.getAccelFeedDivider(),
