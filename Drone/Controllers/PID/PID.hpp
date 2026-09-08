@@ -119,6 +119,19 @@ public:
 	// True when the last update() had its output clipped by setOutputLimit().
 	bool isSaturated(void) const { return _saturated; }
 
+	// Samples update()/updateError() REFUSED because an input was not finite
+	// or dt was not positive. Refusing is right -- a NaN reaching the
+	// integrator is permanent and no later good sample recovers it -- but the
+	// loop then holds its last output indefinitely, and a frozen loop is
+	// otherwise indistinguishable from a healthy one commanding that value.
+	//
+	// So this is the evidence that the freeze happened. On a rate loop it is
+	// the difference between "the aircraft is holding attitude" and "the
+	// aircraft has been repeating one torque demand since the gyro died".
+	// Non-zero means a sensor or a clock upstream is broken; it should read
+	// zero for the life of the aircraft. Cleared by reset().
+	uint32_t getRejectedCount(void) const { return _rejected; }
+
 private:
 	// Shared tail: integrate, sum, clamp. Both entry points converge here once
 	// they have produced an error and a derivative.
@@ -148,6 +161,7 @@ private:
 	float _ff_out;
 	float _output;
 	bool _saturated;
+	uint32_t _rejected;
 
 	// Set by reset() and on construction: the next update seeds the filters
 	// from its input rather than sliding toward it from zero.
