@@ -110,15 +110,6 @@ struct IndicatorLed {
 
 class Indicator {
 public:
-	// Channel identifiers, and the count. Ordered as declared so a loop over
-	// them reads top-to-bottom the way the states are documented above.
-	enum Channel : uint8_t {
-		CHANNEL_SYSTEM = 0,
-		CHANNEL_ARM    = 1,
-		CHANNEL_GPS    = 2,
-		CHANNEL_COUNT  = 3
-	};
-
 	Indicator(const IndicatorLed &system, const IndicatorLed &arm,
 			const IndicatorLed &gps);
 
@@ -141,15 +132,16 @@ public:
 	ArmState getArmState() const { return _armState; }
 	GPSState getGPSState() const { return _gpsState; }
 
-	// Whether a channel is lit right now, as of the last update(). Reported by
-	// DIAG, and the seam the tests drive: it is the rendered result, so it
-	// verifies the pattern engine without needing to watch the GPIO.
-	bool isLit(Channel ch) const;
-
-	// True while the boot lamp test is still holding every LED on.
-	bool inLampTest() const { return _lampTest; }
-
 private:
+	// Channel identifiers, and the count. Ordered as declared so a loop over
+	// them reads top-to-bottom the way the states are documented above.
+	enum Channel : uint8_t {
+		CHANNEL_SYSTEM = 0,
+		CHANNEL_ARM    = 1,
+		CHANNEL_GPS    = 2,
+		CHANNEL_COUNT  = 3
+	};
+
 	// One LED and everything needed to render it.
 	struct Output {
 		IndicatorLed led;
