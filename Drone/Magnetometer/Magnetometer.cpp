@@ -47,7 +47,8 @@ Vector3f Magnetometer::remapMag(const Vector3f &v) { return remapBoardAxes(v); }
 
 Magnetometer::Magnetometer() :
 		_sensor { &hspi3, SPI3_CS_GPIO_Port, SPI3_CS_Pin }, _data { },
-		_calibrator { nullptr }, _status { MAG_StatusTypeDef::ERROR },
+		_raw_field { }, _calibrator { nullptr },
+		_status { MAG_StatusTypeDef::ERROR },
 		_hasData { false } {
 }
 
@@ -77,6 +78,10 @@ void Magnetometer::update(void) {
 	// LIS3MDL_Data carries loose floats; the calibrator and the remap both
 	// work on a vector, so convert once here and write back once below.
 	Vector3f field = remapMag(Vector3f(sample.x, sample.y, sample.z));
+
+	// Captured BEFORE any correction, which is the whole point of it -- see
+	// getRawField().
+	_raw_field = field;
 
 	if (_calibrator != nullptr) {
 		if (_calibrator->isCompassCalibrating()) {

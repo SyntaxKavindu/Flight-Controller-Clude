@@ -41,6 +41,12 @@
  *                          matrices, board rotation. After a power cycle this
  *                          is what came back off the EEPROM.
  *         DIAG             dump loop counters and estimator health
+ *         STREAM,MAG       stream raw + corrected magnetometer samples
+ *         STREAM,ACCL      stream raw + corrected accelerometer samples
+ *         STREAM,OFF       stop streaming
+ *                          "$STREAM,M|A,rx,ry,rz,cx,cy,cz" -- see
+ *                          tools/stream_plot.py, which plots both clouds so a
+ *                          calibration can be checked by eye
  *
  * Out : one record per line, "$KEY,fields...\r\n". Callers build the record;
  *       this class frames and sends it.

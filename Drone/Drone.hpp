@@ -78,6 +78,15 @@
 // a moving vehicle would be levelled against its own acceleration.
 #define DRONE_SEED_STILLNESS_MPS2        0.6f
 
+// What the raw/corrected sample stream is currently emitting. Values are part
+// of the wire protocol -- tools/stream_plot.py and the STREAM command both
+// name them -- so do not renumber them.
+enum DroneStreamMode {
+	DRONE_STREAM_OFF   = 0,
+	DRONE_STREAM_ACCEL = 1,
+	DRONE_STREAM_MAG   = 2
+};
+
 // ---------------------------------------------------------------------------
 // Loop rates.
 //
@@ -151,11 +160,25 @@
 // most needs the panel to keep reporting.
 #define DRONE_INDICATOR_HZ               50
 
+// Raw/corrected sample stream, for the calibration check plotted by
+// tools/stream_plot.py. Ground-only: it is a diagnostic, not a flight feature.
+//
+// 25 Hz is chosen against the LINK, not against the plot. Each line is about
+// 60 bytes, so this is ~1.5 kB/s against the ~64 kB/s a USB full-speed CDC
+// endpoint can carry -- but Telemetry::send() blocks up to
+// TELEMETRY_TX_TIMEOUT_MS waiting for the endpoint, and that cost lands in the
+// flight loop. At 25 Hz the worst case is 5% of the CPU and the typical case is
+// nothing. The magnetometer is only read at DRONE_MID_LOOP_HZ (50) anyway, so
+// past 50 this would emit the same sample twice and make the plot look denser
+// than the evidence actually is.
+#define DRONE_STREAM_HZ                  25
+
 #define DRONE_FAST_LOOP_PERIOD_MS        (1000u / DRONE_FAST_LOOP_HZ)
 #define DRONE_MID_LOOP_PERIOD_MS         (1000u / DRONE_MID_LOOP_HZ)
 #define DRONE_SLOW_LOOP_PERIOD_MS        (1000u / DRONE_SLOW_LOOP_HZ)
 #define DRONE_POLL_PERIOD_MS             (1000u / DRONE_POLL_HZ)
 #define DRONE_INDICATOR_PERIOD_MS        (1000u / DRONE_INDICATOR_HZ)
+#define DRONE_STREAM_PERIOD_MS           (1000u / DRONE_STREAM_HZ)
 
 static_assert(DRONE_FAST_LOOP_PERIOD_MS >= 1u,
 		"HAL_GetTick() is 1 ms: the fast group cannot be dispatched faster than 1 kHz");
@@ -223,6 +246,13 @@ public:
 	// Passes between due dates do nothing but check those gates.
 	void loop(void);
 
+	// Start or stop the raw/corrected sample stream. Ground diagnostic; see
+	// DRONE_STREAM_HZ and tools/stream_plot.py.
+	void setStreamMode(DroneStreamMode mode);
+	DroneStreamMode getStreamMode(void) const {
+		return (DroneStreamMode) _streamMode;
+	}
+
 	// Dumps the loop counters and the estimator's health on demand. Answers
 	// the one question a silent vehicle cannot: is the loop running and every
 	// group bailing out, or has the loop itself stopped?
@@ -238,6 +268,8 @@ private:
 	uint32_t _pollSkipped;      // passes since poll() last ran; see DRONE_POLL_MAX_SKIP
 	uint32_t _lastMidTick;
 	uint32_t _lastIndicatorTick;
+	uint32_t _lastStreamTick;
+	uint8_t _streamMode;        // a DroneStreamMode
 	uint32_t _lastSlowTick;
 	uint32_t _lastPublishTick;
 	float _lastReportedResetTime;   // so one estimator reset is reported once
@@ -288,6 +320,9 @@ private:
 	// render it. Health only -- arming and GPS are pushed by whoever owns those
 	// subsystems, which is nothing in Drone yet. See the note on the body.
 	void updateIndicator(void);
+
+	// Emit one raw/corrected pair. See DRONE_STREAM_HZ.
+	void publishStream(void);
 	// Heartbeat and housekeeping. DRONE_SLOW_LOOP_HZ.
 	void slowLoop(void);
 
@@ -307,5 +342,11 @@ private:
 // header -- Drone.hpp pulls in Globals.hpp, which pulls in Telemetry.hpp.
 // There is exactly one Drone; init() binds it.
 void Drone_ReportDiagnostics(void);
+
+// Telemetry's STREAM command reaches the stream through this, for the same
+// reason DIAG does: Telemetry.hpp cannot include Drone.hpp without a cycle.
+// Takes a DroneStreamMode; typed as int so the shim stays declarable from a
+// unit that has not seen the enum.
+void Drone_SetStreamMode(int mode);
 
 #endif /* DRONE_HPP_ */

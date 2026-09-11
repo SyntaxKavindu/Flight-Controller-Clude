@@ -66,8 +66,9 @@ Drone *g_drone = nullptr;
 Drone::Drone() :
 		_esekf { }, _bootStatus { GLOBALS_INIT_OK }, _lastPredictTick { 0 },
 		_lastFastTick { 0 }, _lastPollTick { 0 }, _pollSkipped { 0 },
-		_lastMidTick { 0 }, _lastSlowTick { 0 },
-		_lastPublishTick { 0 },
+		_lastMidTick { 0 },
+		_lastStreamTick { 0 }, _streamMode { DRONE_STREAM_OFF },
+		_lastSlowTick { 0 }, _lastPublishTick { 0 },
 		_lastReportedResetTime { ESEKF_NEVER_RESET }, _lastReportedBaroRejects { 0 },
 		_lastReportedEkfFaults { 0 }, _noEstimateSlowLoops { 0 },
 		_calibrationEpoch { 0 },
@@ -118,6 +119,10 @@ void Drone::init(void) {
 	_pollSkipped = 0;
 	_lastMidTick = now;
 	_lastIndicatorTick = now;
+	_lastStreamTick = now;
+	// Never persists across a boot: a stream left running would spend link
+	// bandwidth and loop time on a diagnostic nobody is watching.
+	_streamMode = DRONE_STREAM_OFF;
 	_lastSlowTick = now;
 	_lastPublishTick = now;
 	_lastReportedResetTime = ESEKF_NEVER_RESET;
@@ -220,6 +225,14 @@ void Drone::loop(void) {
 		midLoop();
 		_midMs += HAL_GetTick() - t0;
 	}
+	// After the mid group above, so a magnetometer sample is at most one mid
+	// cycle old when it goes out, and gated separately from publishState() so
+	// turning the stream on cannot change the rate of the normal telemetry.
+	if (_streamMode != DRONE_STREAM_OFF
+			&& due(now, _lastStreamTick, DRONE_STREAM_PERIOD_MS)) {
+		publishStream();
+	}
+
 	if (due(now, _lastPublishTick, DRONE_PUBLISH_PERIOD_MS)) {
 		_publishCount++;
 		const uint32_t t0 = HAL_GetTick();
@@ -492,6 +505,49 @@ void Drone::updateIndicator(void) {
 	indicator.update();
 }
 
+void Drone::setStreamMode(DroneStreamMode mode) {
+	_streamMode = (uint8_t) mode;
+	// Re-baselined so the first sample goes out on the next due tick rather than
+	// immediately, which keeps the spacing in the plot honest from the start.
+	_lastStreamTick = HAL_GetTick();
+}
+
+// One line per sample, raw and corrected TOGETHER.
+//
+// Together is the point: emitted as two lines they could be one cycle apart,
+// and a moving airframe -- which is exactly how this data is collected -- would
+// then show a corrected point that does not correspond to the raw one beside
+// it. The plot would blur in a way that looks like calibration error.
+//
+// Raw here means axis-remapped but uncorrected, which is the input the
+// calibration actually fits. Corrected means what the flight stack uses, board
+// rotation included -- a rotation does not change a sphere, so it cannot
+// flatter the result.
+void Drone::publishStream(void) {
+	if (_streamMode == DRONE_STREAM_ACCEL) {
+		IMU_Data d;
+		if (imu.getData(d) != IMU_StatusTypeDef::OK) {
+			return;   // no sample yet; say nothing rather than emit zeros
+		}
+		const Vector3f raw = imu.getRawAccel();
+		telemetry.send("$STREAM,A,%.4f,%.4f,%.4f,%.4f,%.4f,%.4f",
+				(double) raw.x, (double) raw.y, (double) raw.z,
+				(double) d.accel.x, (double) d.accel.y, (double) d.accel.z);
+		return;
+	}
+
+	if (_streamMode == DRONE_STREAM_MAG) {
+		LIS3MDL_Data d;
+		if (magnetometer.getData(d) != MAG_StatusTypeDef::OK) {
+			return;
+		}
+		const Vector3f raw = magnetometer.getRawField();
+		telemetry.send("$STREAM,M,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f",
+				(double) raw.x, (double) raw.y, (double) raw.z,
+				(double) d.x, (double) d.y, (double) d.z);
+	}
+}
+
 void Drone::seedEstimator(bool imu_ok, const IMU_Data &imu_data) {
 	// initialize() levels the airframe from the accelerometer and takes its
 	// heading from the magnetometer, so both are required -- seeding attitude
@@ -706,6 +762,11 @@ void Drone::reportDiagnostics(void) {
 			indicator.getArmState() == ArmState::ARMED ? "ARMED" : "SAFE",
 			indicator.getGPSState() == GPSState::LOCKED ? "FIX" : "SEARCH");
 
+	// A stream left running is a real cost -- see DRONE_STREAM_HZ -- and it is
+	// otherwise invisible once the plotting tool is closed.
+	telemetry.send("$DIAG,STREAM mode=%u hz=%u",
+			(unsigned) _streamMode, (unsigned) DRONE_STREAM_HZ);
+
 	telemetry.send("$DIAG,CALFEED div=%u hz=%u",
 			(unsigned) calibrator.getAccelFeedDivider(),
 			(unsigned) (DRONE_FAST_LOOP_HZ / (calibrator.getAccelFeedDivider() ?
@@ -758,6 +819,14 @@ void Drone::reportDiagnostics(void) {
 			(unsigned) (st.vert_pos_valid ? 1 : 0),
 			(unsigned) (st.mag_aiding ? 1 : 0),
 			(unsigned) (calibrator.isCalibrating() ? 1 : 0));
+}
+
+void Drone_SetStreamMode(int mode) {
+	if (g_drone == nullptr) {
+		telemetry.send("$ERR,NO DRONE BOUND");
+		return;
+	}
+	g_drone->setStreamMode((DroneStreamMode) mode);
 }
 
 void Drone_ReportDiagnostics(void) {

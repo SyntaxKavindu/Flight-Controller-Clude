@@ -21,6 +21,7 @@ extern "C" uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len);
 // which would be circular: Drone.hpp pulls in Globals.hpp, which pulls in this
 // header.
 void Drone_ReportDiagnostics(void);
+void Drone_SetStreamMode(int mode);
 
 extern "C" void Telemetry_Receive(const uint8_t *data, uint32_t len) {
 	if (data == nullptr) {
@@ -273,6 +274,32 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		// for the case where nothing else is talking.
 		send("$ACK,%s", echo);
 		Drone_ReportDiagnostics();
+		return;
+	}
+
+	if (tokenEquals(name, "STREAM")) {
+		// Raw + corrected sample pairs, for the calibration check plotted by
+		// tools/stream_plot.py. Answerable while calibrating: watching the cloud
+		// fill during a CALMAG is one of the more useful things this does -- the
+		// corrections applied are last run's, which is exactly what you want to
+		// see being replaced.
+		if (arg == nullptr || *arg == '\0') {
+			send("$NAK,%s,NEEDARG (MAG|ACCL|OFF)", echo);
+			return;
+		}
+		int mode = -1;
+		if (tokenEquals(arg, "OFF"))       mode = 0;
+		else if (tokenEquals(arg, "ACCL")) mode = 1;
+		else if (tokenEquals(arg, "MAG"))  mode = 2;
+		if (mode < 0) {
+			send("$NAK,%s,UNKNOWN (MAG|ACCL|OFF)", echo);
+			return;
+		}
+		send("$ACK,%s", echo);
+		Drone_SetStreamMode(mode);
+		// A header line, so the plotting tool can confirm it is reading the
+		// stream it asked for rather than inferring it from the first sample.
+		send("$STREAM,MODE,%d", mode);
 		return;
 	}
 

@@ -67,3 +67,4 @@ uint8_t CDC_Transmit_FS(uint8_t*, uint16_t) { return 0; }
 // Telemetry in for the calibrator's reporting. Weak so a suite that DOES link
 // Drone.cpp overrides it rather than colliding.
 __attribute__((weak)) void Drone_ReportDiagnostics(void) {}
+__attribute__((weak)) void Drone_SetStreamMode(int) {}

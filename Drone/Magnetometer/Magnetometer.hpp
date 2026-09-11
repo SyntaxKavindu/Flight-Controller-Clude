@@ -34,9 +34,21 @@ public:
 	MAG_StatusTypeDef getStatus(void) const { return _status; }
 	bool hasData(void) const { return _hasData; }
 
+	// The sample as the SENSOR reported it: axis-remapped into the body frame,
+	// but with no hard/soft-iron correction and no board rotation applied.
+	//
+	// This is the exact input the compass calibration fits, which is what makes
+	// it comparable with getData() -- plot both and a good calibration shows the
+	// raw cloud as an offset, squashed ellipsoid and the corrected one as a
+	// sphere centred on the origin. Nothing in flight should use it.
+	Vector3f getRawField(void) const { return _raw_field; }
+
 private:
 	LIS3MDL _sensor;
 	LIS3MDL_Data _data;
+	// Kept only for getRawField(). update() corrects in place, so without this
+	// the pre-correction value is gone by the time anyone could ask for it.
+	Vector3f _raw_field;
 
 	Calibrator *_calibrator;
 	MAG_StatusTypeDef _status;
