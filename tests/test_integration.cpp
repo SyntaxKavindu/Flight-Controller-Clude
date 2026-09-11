@@ -2,7 +2,7 @@
  * The Calibrator facade against the sensor frontends and the estimator: the
  * wiring, ordering and stand-down behaviour that the engine tests cannot see.
  */
-#include "Globals.hpp"
+#include "Drone.hpp"
 #include "ESEKF.hpp"
 #include "test.hpp"
 
@@ -15,15 +15,15 @@ using namespace phys;
 static void runSixPosition(const Vector3f &scale, const Vector3f &bias,
                            int calls_per_position = 120)
 {
-    calibrator.startAccelerometerCalibration();
+    drone.calibrator.startAccelerometerCalibration();
     const Vector3f truth[6] = {{G,0,0},{-G,0,0},{0,G,0},{0,-G,0},{0,0,G},{0,0,-G}};
-    for (int p = 0; p < 6 && calibrator.isAcclCalibrating(); p++) {
-        calibrator.confirmReady();
-        for (int i = 0; i < calls_per_position && calibrator.isAcclCalibrating(); i++) {
+    for (int p = 0; p < 6 && drone.calibrator.isAcclCalibrating(); p++) {
+        drone.calibrator.confirmReady();
+        for (int i = 0; i < calls_per_position && drone.calibrator.isAcclCalibrating(); i++) {
             Vector3f s(scale.x * truth[p].x + bias.x,
                        scale.y * truth[p].y + bias.y,
                        scale.z * truth[p].z + bias.z);
-            calibrator.calibrateAccelerometer(s);
+            drone.calibrator.calibrateAccelerometer(s);
         }
     }
 }
@@ -32,72 +32,72 @@ int main()
 {
     section("Facade: procedure exclusion and epoch");
     {
-        calibrator.init(nullptr);   // no EEPROM: gains live for this session only
-        check(!calibrator.isCalibrating(), "starts idle");
-        check(!calibrator.isAcclCalibrated(), "starts uncalibrated with no storage");
+        drone.calibrator.init(false);   // no EEPROM: gains live for this session only
+        check(!drone.calibrator.isCalibrating(), "starts idle");
+        check(!drone.calibrator.isAcclCalibrated(), "starts uncalibrated with no storage");
 
-        calibrator.startCompassCalibration();
-        check(calibrator.isCompassCalibrating(), "compass calibration starts");
-        calibrator.startAccelerometerCalibration();
-        check(!calibrator.isAcclCalibrating(), "a second procedure is refused while one runs");
-        calibrator.startLevelCalibration();
-        check(!calibrator.isLevelCalibrating(), "levelling is refused too");
-        check(calibrator.isCalibrating(), "isCalibrating() covers all three");
-        calibrator.cancelCalibration();
-        check(!calibrator.isCalibrating(), "cancel clears every procedure");
+        drone.calibrator.startCompassCalibration();
+        check(drone.calibrator.isCompassCalibrating(), "compass calibration starts");
+        drone.calibrator.startAccelerometerCalibration();
+        check(!drone.calibrator.isAcclCalibrating(), "a second procedure is refused while one runs");
+        drone.calibrator.startLevelCalibration();
+        check(!drone.calibrator.isLevelCalibrating(), "levelling is refused too");
+        check(drone.calibrator.isCalibrating(), "isCalibrating() covers all three");
+        drone.calibrator.cancelCalibration();
+        check(!drone.calibrator.isCalibrating(), "cancel clears every procedure");
     }
     {
-        const uint32_t e0 = calibrator.getCalibrationEpoch();
+        const uint32_t e0 = drone.calibrator.getCalibrationEpoch();
         runSixPosition(Vector3f(1.03f, 0.98f, 1.01f), Vector3f(0.2f, -0.15f, 0.1f));
-        check(calibrator.isAcclCalibrated(), "six-position completes through the facade");
-        check(calibrator.getCalibrationEpoch() != e0, "epoch bumps when gains change");
-        const uint32_t e1 = calibrator.getCalibrationEpoch();
-        calibrator.clearStoredCalibration();
-        check(calibrator.getCalibrationEpoch() != e1, "epoch bumps when calibration is erased");
-        check(!calibrator.isAcclCalibrated(), "erasing clears the applied gains");
+        check(drone.calibrator.isAcclCalibrated(), "six-position completes through the facade");
+        check(drone.calibrator.getCalibrationEpoch() != e0, "epoch bumps when gains change");
+        const uint32_t e1 = drone.calibrator.getCalibrationEpoch();
+        drone.calibrator.clearStoredCalibration();
+        check(drone.calibrator.getCalibrationEpoch() != e1, "epoch bumps when calibration is erased");
+        check(!drone.calibrator.isAcclCalibrated(), "erasing clears the applied gains");
     }
 
     section("Facade: correction is applied, in the right order");
     {
-        calibrator.init(nullptr);
+        drone.calibrator.init(false);
         const Vector3f scale(1.03f, 0.98f, 1.01f), bias(0.2f, -0.15f, 0.1f);
         runSixPosition(scale, bias);
         // A level airframe: raw reading distorted by the sensor, corrected back.
         Vector3f raw(scale.x * 0.0f + bias.x, scale.y * 0.0f + bias.y,
                      scale.z * -G + bias.z);
-        calibrator.correctAcclData(raw);
+        drone.calibrator.correctAcclData(raw);
         checkNear(raw.length(), G, 0.02f, "corrected accel is restored to 1 g in m/s^2");
         checkNear(raw.z, -G, 0.05f, "... and points down the body Z axis");
     }
 
     section("Level calibration through the facade");
     {
-        calibrator.init(nullptr);
+        drone.calibrator.init(false);
         runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));   // ideal sensor
-        check(calibrator.isAcclCalibrated(), "accelerometer calibrated first");
+        check(drone.calibrator.isAcclCalibrated(), "accelerometer calibrated first");
 
         // Board bolted in 3 degrees out about the roll axis.
         const float a = 3.0f * D2R, c = std::cos(a), s = std::sin(a);
         const Vector3f level(0.0f, 0.0f, -G);
         const Vector3f measured(level.x, c*level.y - s*level.z, s*level.y + c*level.z);
 
-        calibrator.startLevelCalibration();
-        check(calibrator.isLevelCalibrating(), "levelling starts once accel is calibrated");
-        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
+        drone.calibrator.startLevelCalibration();
+        check(drone.calibrator.isLevelCalibrating(), "levelling starts once accel is calibrated");
+        for (int i = 0; i < 400 && drone.calibrator.isLevelCalibrating(); i++) {
             Vector3f v = measured;
-            calibrator.calibrateLevel(v);
+            drone.calibrator.calibrateLevel(v);
         }
-        check(calibrator.isLevelCalibrated(), "levelling completes");
+        check(drone.calibrator.isLevelCalibrated(), "levelling completes");
 
         Vector3f corrected = measured;
-        calibrator.correctBoardFrame(corrected);
+        drone.calibrator.correctBoardFrame(corrected);
         const float err = std::acos(std::fmin(1.0f, corrected.dot(level) / (corrected.length()*G))) * R2D;
         checkNear(err, 0.0f, 0.02f, "board rotation removes the mounting error");
     }
     {
-        calibrator.init(nullptr);
-        calibrator.startLevelCalibration();
-        check(!calibrator.isLevelCalibrating(),
+        drone.calibrator.init(false);
+        drone.calibrator.startLevelCalibration();
+        check(!drone.calibrator.isLevelCalibrating(),
               "levelling refuses to run without an accelerometer calibration");
     }
 
@@ -106,22 +106,22 @@ int main()
         // The rotation describes the BOARD, so it must reach the gyro too --
         // an accelerometer in one frame and a gyro in another drifts only under
         // motion, which is the hardest failure to attribute.
-        calibrator.init(nullptr);
+        drone.calibrator.init(false);
         runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));
         const float a = 5.0f * D2R, c = std::cos(a), s = std::sin(a);
         const Vector3f level(0.0f, 0.0f, -G);
         const Vector3f measured(level.x, c*level.y - s*level.z, s*level.y + c*level.z);
-        calibrator.startLevelCalibration();
-        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
-            Vector3f v = measured; calibrator.calibrateLevel(v);
+        drone.calibrator.startLevelCalibration();
+        for (int i = 0; i < 400 && drone.calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; drone.calibrator.calibrateLevel(v);
         }
-        check(calibrator.isLevelCalibrated(), "levelling completed for the frame test");
+        check(drone.calibrator.isLevelCalibrated(), "levelling completed for the frame test");
 
         // Same rotation must be applied to any vector handed to correctBoardFrame,
         // gyro included -- verified by construction: one function, one matrix.
         Vector3f gyro(0.1f, 0.2f, 0.3f), accel(0.1f, 0.2f, 0.3f);
-        calibrator.correctBoardFrame(gyro);
-        calibrator.correctBoardFrame(accel);
+        drone.calibrator.correctBoardFrame(gyro);
+        drone.calibrator.correctBoardFrame(accel);
         check(gyro.x == accel.x && gyro.y == accel.y && gyro.z == accel.z,
               "gyro and accelerometer get an identical board rotation");
         checkNear(gyro.length(), 0.374166f, 1e-4f, "a rotation preserves magnitude");
@@ -193,57 +193,57 @@ int main()
         // time. Driven from a 1 kHz control loop they all run 5x short -- most
         // damagingly the stall limit, which would then abort a run that a real
         // operator is completing normally. See CALIBRATOR_ACCEL_FEED_HZ.
-        calibrator.init(nullptr);
-        check(calibrator.getAccelFeedDivider() == 1,
+        drone.calibrator.init(false);
+        check(drone.calibrator.getAccelFeedDivider() == 1,
               "undecimated by default, so an existing 200 Hz caller is unaffected");
 
-        calibrator.setAccelFeedRate(1000);
-        check(calibrator.getAccelFeedDivider() == 5, "1 kHz feed decimates by 5");
-        calibrator.setAccelFeedRate(981);   // the rate this airframe measures
-        check(calibrator.getAccelFeedDivider() == 5, "981 Hz rounds to 5, not 4");
-        calibrator.setAccelFeedRate(500);
-        check(calibrator.getAccelFeedDivider() == 3, "500 Hz rounds to nearest (166 Hz)");
-        calibrator.setAccelFeedRate(200);
-        check(calibrator.getAccelFeedDivider() == 1, "a caller already at 200 Hz is left alone");
-        calibrator.setAccelFeedRate(50);
-        check(calibrator.getAccelFeedDivider() == 1, "a slower caller is never upsampled");
-        calibrator.setAccelFeedRate(0);
-        check(calibrator.getAccelFeedDivider() == 1, "zero does not divide by zero");
+        drone.calibrator.setAccelFeedRate(1000);
+        check(drone.calibrator.getAccelFeedDivider() == 5, "1 kHz feed decimates by 5");
+        drone.calibrator.setAccelFeedRate(981);   // the rate this airframe measures
+        check(drone.calibrator.getAccelFeedDivider() == 5, "981 Hz rounds to 5, not 4");
+        drone.calibrator.setAccelFeedRate(500);
+        check(drone.calibrator.getAccelFeedDivider() == 3, "500 Hz rounds to nearest (166 Hz)");
+        drone.calibrator.setAccelFeedRate(200);
+        check(drone.calibrator.getAccelFeedDivider() == 1, "a caller already at 200 Hz is left alone");
+        drone.calibrator.setAccelFeedRate(50);
+        check(drone.calibrator.getAccelFeedDivider() == 1, "a slower caller is never upsampled");
+        drone.calibrator.setAccelFeedRate(0);
+        check(drone.calibrator.getAccelFeedDivider() == 1, "zero does not divide by zero");
     }
     {
         // Changing the divider mid-run would judge the rest of a procedure
         // against a different stillness window and stall timeout than the part
         // already collected.
-        calibrator.init(nullptr);
-        calibrator.setAccelFeedRate(1000);
-        calibrator.startCompassCalibration();
-        calibrator.setAccelFeedRate(200);
-        check(calibrator.getAccelFeedDivider() == 5, "the divider is frozen while a run is live");
-        calibrator.cancelCalibration();
-        calibrator.setAccelFeedRate(200);
-        check(calibrator.getAccelFeedDivider() == 1, "... and settable again once idle");
+        drone.calibrator.init(false);
+        drone.calibrator.setAccelFeedRate(1000);
+        drone.calibrator.startCompassCalibration();
+        drone.calibrator.setAccelFeedRate(200);
+        check(drone.calibrator.getAccelFeedDivider() == 5, "the divider is frozen while a run is live");
+        drone.calibrator.cancelCalibration();
+        drone.calibrator.setAccelFeedRate(200);
+        check(drone.calibrator.getAccelFeedDivider() == 1, "... and settable again once idle");
     }
     {
         // The behavioural proof: with a divider of 5 a position needs 5x the
         // calls, and lands on exactly 5x -- which is only true if the phase is
         // reset at the start of the run rather than left wherever it was.
-        calibrator.init(nullptr);
-        calibrator.setAccelFeedRate(1000);
-        calibrator.startAccelerometerCalibration();
-        calibrator.confirmReady();
+        drone.calibrator.init(false);
+        drone.calibrator.setAccelFeedRate(1000);
+        drone.calibrator.startAccelerometerCalibration();
+        drone.calibrator.confirmReady();
         // Phase 0 is the accepted one, so accepted-count after N calls is
         // ceil(N/5) and the 100th lands on call 5*99+1 = 496. Landing exactly
         // there is what proves the phase was reset at the start of the run:
         // left wherever the previous procedure abandoned it, the first accepted
         // sample would slip by up to four calls.
-        for (int i = 0; i < 495; i++) { Vector3f s(G, 0, 0); calibrator.calibrateAccelerometer(s); }
-        check(!calibrator.isAwaitingPosition(),
+        for (int i = 0; i < 495; i++) { Vector3f s(G, 0, 0); drone.calibrator.calibrateAccelerometer(s); }
+        check(!drone.calibrator.isAwaitingPosition(),
               "495 calls at div=5 is one accepted sample short of the position");
         Vector3f s(G, 0, 0);
-        calibrator.calibrateAccelerometer(s);
-        check(calibrator.isAwaitingPosition(),
+        drone.calibrator.calibrateAccelerometer(s);
+        check(drone.calibrator.isAwaitingPosition(),
               "the 496th call completes it -- 100 accepted samples, exactly 5x");
-        calibrator.cancelCalibration();
+        drone.calibrator.cancelCalibration();
     }
     {
         // Decimation must not change the ANSWER, only the rate: same sensor,
@@ -251,20 +251,20 @@ int main()
         const Vector3f scale(1.03f, 0.98f, 1.01f), bias(0.2f, -0.15f, 0.1f);
         Vector3f probe(bias.x, bias.y, scale.z * -G + bias.z);
 
-        calibrator.init(nullptr);
-        check(calibrator.getAccelFeedDivider() == 5,
+        drone.calibrator.init(false);
+        check(drone.calibrator.getAccelFeedDivider() == 5,
               "init() leaves the divider alone -- it is caller wiring, not calibration state");
-        calibrator.setAccelFeedRate(200);               // div = 1
+        drone.calibrator.setAccelFeedRate(200);               // div = 1
         runSixPosition(scale, bias);
         Vector3f undecimated = probe;
-        calibrator.correctAcclData(undecimated);
+        drone.calibrator.correctAcclData(undecimated);
 
-        calibrator.init(nullptr);
-        calibrator.setAccelFeedRate(1000);              // div = 5
+        drone.calibrator.init(false);
+        drone.calibrator.setAccelFeedRate(1000);              // div = 5
         runSixPosition(scale, bias, 600);
-        check(calibrator.isAcclCalibrated(), "six-position still completes when decimated");
+        check(drone.calibrator.isAcclCalibrated(), "six-position still completes when decimated");
         Vector3f decimated = probe;
-        calibrator.correctAcclData(decimated);
+        drone.calibrator.correctAcclData(decimated);
 
         checkNear(decimated.x, undecimated.x, 1e-5f, "decimation leaves the X gain identical");
         checkNear(decimated.y, undecimated.y, 1e-5f, "... and Y");
@@ -273,27 +273,27 @@ int main()
     {
         // The levelling fit is on the same feed and has the same kind of gate,
         // so it is decimated too -- LEVEL_CAL_SAMPLES is a count, not a time.
-        calibrator.init(nullptr);
-        calibrator.setAccelFeedRate(1000);
+        drone.calibrator.init(false);
+        drone.calibrator.setAccelFeedRate(1000);
         runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0), 600);
 
         const float a = 3.0f * D2R, c = std::cos(a), sn = std::sin(a);
         const Vector3f level(0.0f, 0.0f, -G);
         const Vector3f measured(level.x, c*level.y - sn*level.z, sn*level.y + c*level.z);
 
-        calibrator.startLevelCalibration();
-        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
-            Vector3f v = measured; calibrator.calibrateLevel(v);
+        drone.calibrator.startLevelCalibration();
+        for (int i = 0; i < 400 && drone.calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; drone.calibrator.calibrateLevel(v);
         }
-        check(!calibrator.isLevelCalibrated(),
+        check(!drone.calibrator.isLevelCalibrated(),
               "400 calls at div=5 is short of LEVEL_CAL_SAMPLES -- the gate really is decimated");
-        for (int i = 0; i < 1200 && calibrator.isLevelCalibrating(); i++) {
-            Vector3f v = measured; calibrator.calibrateLevel(v);
+        for (int i = 0; i < 1200 && drone.calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; drone.calibrator.calibrateLevel(v);
         }
-        check(calibrator.isLevelCalibrated(), "... and completes once enough samples arrive");
+        check(drone.calibrator.isLevelCalibrated(), "... and completes once enough samples arrive");
 
         Vector3f corrected = measured;
-        calibrator.correctBoardFrame(corrected);
+        drone.calibrator.correctBoardFrame(corrected);
         const float err = std::acos(std::fmin(1.0f, corrected.dot(level) / (corrected.length()*G))) * R2D;
         checkNear(err, 0.0f, 0.02f, "the decimated levelling fit is just as accurate");
     }
@@ -302,13 +302,13 @@ int main()
     // init() deliberately does not clear the divider (see above), and the
     // decimation section left it at 5. These blocks count calls, so put it
     // back rather than quietly running them five times short.
-    calibrator.setAccelFeedRate(200);
+    drone.calibrator.setAccelFeedRate(200);
     {
         // The sequence ends on Z_DOWN -- +Z (the body DOWN axis) pointing down,
         // i.e. the airframe upright reading (0,0,-g). That is exactly what the
         // levelling fit wants, and the airframe is already still in it, so the
         // level run can start with no operator input at all.
-        calibrator.init(nullptr);
+        drone.calibrator.init(false);
 
         // A board bolted in 3 degrees out about roll. The six-position truth
         // vectors are what the SENSOR sees, so the mounting tilt shows up in
@@ -319,29 +319,29 @@ int main()
             return Vector3f(v.x, c*v.y - sn*v.z, sn*v.y + c*v.z);
         };
 
-        calibrator.startAccelerometerCalibration(true);
+        drone.calibrator.startAccelerometerCalibration(true);
         const Vector3f truth[6] = {{G,0,0},{-G,0,0},{0,G,0},{0,-G,0},{0,0,G},{0,0,-G}};
-        for (int p = 0; p < 6 && calibrator.isAcclCalibrating(); p++) {
-            calibrator.confirmReady();
-            for (int i = 0; i < 120 && calibrator.isAcclCalibrating(); i++) {
+        for (int p = 0; p < 6 && drone.calibrator.isAcclCalibrating(); p++) {
+            drone.calibrator.confirmReady();
+            for (int i = 0; i < 120 && drone.calibrator.isAcclCalibrating(); i++) {
                 Vector3f smp = truth[p];
-                calibrator.calibrateAccelerometer(smp);
+                drone.calibrator.calibrateAccelerometer(smp);
             }
         }
-        check(calibrator.isAcclCalibrated(), "the six-position fit still completes");
-        check(calibrator.isLevelCalibrating(),
+        check(drone.calibrator.isAcclCalibrated(), "the six-position fit still completes");
+        check(drone.calibrator.isLevelCalibrating(),
               "levelling starts by itself -- no second command");
-        check(calibrator.isCalibrating(), "isCalibrating() covers the chained run");
+        check(drone.calibrator.isCalibrating(), "isCalibrating() covers the chained run");
 
         // The operator has not moved anything: keep feeding the Z_DOWN reading.
         const Vector3f measured = tilt(Vector3f(0.0f, 0.0f, -G));
-        for (int i = 0; i < 400 && calibrator.isLevelCalibrating(); i++) {
-            Vector3f v = measured; calibrator.calibrateLevel(v);
+        for (int i = 0; i < 400 && drone.calibrator.isLevelCalibrating(); i++) {
+            Vector3f v = measured; drone.calibrator.calibrateLevel(v);
         }
-        check(calibrator.isLevelCalibrated(), "the chained levelling completes");
+        check(drone.calibrator.isLevelCalibrated(), "the chained levelling completes");
 
         Vector3f corrected = measured;
-        calibrator.correctBoardFrame(corrected);
+        drone.calibrator.correctBoardFrame(corrected);
         const Vector3f level(0.0f, 0.0f, -G);
         const float err = std::acos(std::fmin(1.0f,
                 corrected.dot(level) / (corrected.length()*G))) * R2D;
@@ -350,21 +350,21 @@ int main()
     {
         // Default is unchanged: a plain CALIMU must not silently promote
         // whatever surface it ran on into the definition of level.
-        calibrator.init(nullptr);
+        drone.calibrator.init(false);
         runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));
-        check(calibrator.isAcclCalibrated(), "plain six-position completes");
-        check(!calibrator.isLevelCalibrating(), "plain CALIMU does NOT chain");
-        check(!calibrator.isCalibrating(), "... and leaves the facade idle");
+        check(drone.calibrator.isAcclCalibrated(), "plain six-position completes");
+        check(!drone.calibrator.isLevelCalibrating(), "plain CALIMU does NOT chain");
+        check(!drone.calibrator.isCalibrating(), "... and leaves the facade idle");
     }
     {
         // A cancelled run must not leave a chain armed for whatever runs next.
-        calibrator.init(nullptr);
-        calibrator.startAccelerometerCalibration(true);
-        calibrator.cancelCalibration();
-        check(!calibrator.isCalibrating(), "the armed run cancels cleanly");
+        drone.calibrator.init(false);
+        drone.calibrator.startAccelerometerCalibration(true);
+        drone.calibrator.cancelCalibration();
+        check(!drone.calibrator.isCalibrating(), "the armed run cancels cleanly");
         runSixPosition(Vector3f(1,1,1), Vector3f(0,0,0));
-        check(calibrator.isAcclCalibrated(), "a later plain run completes");
-        check(!calibrator.isLevelCalibrating(),
+        check(drone.calibrator.isAcclCalibrated(), "a later plain run completes");
+        check(!drone.calibrator.isLevelCalibrating(),
               "... and does not inherit the cancelled run's chain");
     }
     return testReport("Integration");

@@ -117,7 +117,12 @@ public:
 	// not persisted and nothing is restored at boot. Also puts the calibrator
 	// back into a known idle state, so calling it again is a clean restart.
 	// Progress and results are reported through the global `telemetry`.
-	void init(EEPROM *storage = nullptr);
+	// storage_available: false brings the calibrator up with NO persistence --
+	// gains are live for the session and every save reports NOTSAVED. That is
+	// the dead-EEPROM boot path, and it is a bool rather than a pointer because
+	// the storage itself is reached through drone.storage like everything else;
+	// what init() needs to know is only whether it works.
+	void init(bool storage_available = false);
 	void correctAcclData(Vector3f &acclData);
 	void correctCompassData(Vector3f &compassData);
 
@@ -264,7 +269,7 @@ public:
 
 	// False when no EEPROM handle was supplied to init(), in which case every
 	// calibration works for the session and none of it survives a reboot.
-	bool hasStorage() const { return _storage != nullptr; }
+	bool hasStorage() const { return _hasStorage; }
 
 	// True when the last completed calibration could not be written to EEPROM
 	// (no storage handle, or the device rejected the write). The gains are
@@ -296,7 +301,7 @@ private:
 	// CALIBRATOR_SAMPLE_ARENA for why sharing is safe.
 	Vector3f _sampleArena[CALIBRATOR_SAMPLE_ARENA];
 
-	EEPROM *_storage;
+	bool _hasStorage;
 
 	bool _isAccelCalibrating;
 	bool _isCompassCalibrating;
@@ -384,9 +389,5 @@ private:
 	Calibrator_StatusTypeDef saveRecord(EEPROMLocation location,
 			const Vector3f &offset, const Matrix3f &matrix);
 };
-
-// The one calibrator. Telemetry drives it; the sensor frontends feed and
-// consult it. Defined in Globals.cpp.
-extern Calibrator calibrator;
 
 #endif /* CALIBRATORS_CALIBRATOR_HPP_ */

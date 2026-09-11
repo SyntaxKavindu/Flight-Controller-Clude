@@ -6,8 +6,7 @@
  */
 
 #include "Calibrator.hpp"
-#include "EEPROM.hpp"
-#include "Telemetry.hpp"
+#include "Drone.hpp"   // drone.storage and drone.telemetry"
 
 #include <cstddef> // offsetof
 #include <cstring> // memset, memcmp
@@ -39,7 +38,7 @@ static_assert(EEPROM::slotCapacity(EEPROMLocation::BOARDLEVELCALIBRATEDAT)
 // calls reset(), which is not a property to depend on silently.
 Calibrator::Calibrator() :
 		_accelerometerCalibrator { }, _compassCalibrator { },
-				_levelCalibrator { }, _storage { nullptr },
+				_levelCalibrator { }, _hasStorage { false },
 				_isAccelCalibrating { false }, _isCompassCalibrating { false },
 				_isLevelCalibrating { false }, _isAccelCalibrated { false },
 				_isCompassCalibrated { false }, _isLevelCalibrated { false },
@@ -52,8 +51,8 @@ Calibrator::Calibrator() :
 				_boardRotation { Matrix3f::identity() } {
 }
 
-void Calibrator::init(EEPROM *storage) {
-	_storage = storage;
+void Calibrator::init(bool storage_available) {
+	_hasStorage = storage_available;
 
 	// Establish a known idle state before loading, so init() is a clean
 	// restart rather than a partial one layered on whatever came before.
@@ -117,7 +116,7 @@ void Calibrator::correctBoardFrame(Vector3f &v) const {
 // entry point refuses here rather than each caller remembering to check.
 bool Calibrator::beginProcedure(const char *stage) {
 	if (isCalibrating()) {
-		telemetry.send("$CAL,%s,FAIL,BUSY", stage);
+		drone.telemetry.send("$CAL,%s,FAIL,BUSY", stage);
 		return false;
 	}
 	_awaitingPosition = false;
@@ -145,7 +144,7 @@ void Calibrator::startAccelerometerCalibration(bool chain_level) {
 	// beginSixPosition() resets the calibrator itself, so no separate reset().
 	_accelerometerCalibrator.beginSixPosition(CALIBRATOR_ACCEL_MOTION_THRESHOLD);
 
-	telemetry.send("$INFO,ACCEL 6-POSITION CALIBRATION STARTED");
+	drone.telemetry.send("$INFO,ACCEL 6-POSITION CALIBRATION STARTED");
 	promptNextPosition();
 }
 
@@ -155,14 +154,14 @@ void Calibrator::startCompassCalibration() {
 	}
 	if (!_compassCalibrator.begin(CALIBRATOR_COMPASS_NOMINAL_GAUSS, _sampleArena,
 			CALIBRATOR_SAMPLE_ARENA)) {
-		telemetry.send("$CAL,MAG,FAIL,NOBUFFER");
+		drone.telemetry.send("$CAL,MAG,FAIL,NOBUFFER");
 		return;
 	}
 	_isCompassCalibrating = true;
 	_isCompassCalibrated = false;
 
-	telemetry.send("$INFO,MAG CALIBRATION STARTED");
-	telemetry.send("$INFO,ROTATE THE AIRFRAME THROUGH AS MANY ORIENTATIONS AS POSSIBLE");
+	drone.telemetry.send("$INFO,MAG CALIBRATION STARTED");
+	drone.telemetry.send("$INFO,ROTATE THE AIRFRAME THROUGH AS MANY ORIENTATIONS AS POSSIBLE");
 }
 
 void Calibrator::startLevelCalibration(float yaw_offset_deg) {
@@ -170,8 +169,8 @@ void Calibrator::startLevelCalibration(float yaw_offset_deg) {
 	// an accelerometer calibration behind it the rotation would absorb the bias
 	// as though it were a mounting error. Refuse rather than store that.
 	if (!_isAccelCalibrated) {
-		telemetry.send("$CAL,LEVEL,FAIL,NOACCLCAL");
-		telemetry.send("$INFO,CALIBRATE THE ACCELEROMETER FIRST");
+		drone.telemetry.send("$CAL,LEVEL,FAIL,NOACCLCAL");
+		drone.telemetry.send("$INFO,CALIBRATE THE ACCELEROMETER FIRST");
 		return;
 	}
 	if (!beginProcedure("LEVEL")) {
@@ -200,8 +199,8 @@ void Calibrator::startLevelCalibration(float yaw_offset_deg) {
 			ACCEL_CAL_STANDARD_GRAVITY, CALIBRATOR_ACCEL_MOTION_THRESHOLD,
 			yaw_offset_deg);
 
-	telemetry.send("$INFO,LEVEL CALIBRATION STARTED");
-	telemetry.send("$INFO,PLACE THE AIRFRAME UPRIGHT ON A LEVEL SURFACE AND HOLD STILL");
+	drone.telemetry.send("$INFO,LEVEL CALIBRATION STARTED");
+	drone.telemetry.send("$INFO,PLACE THE AIRFRAME UPRIGHT ON A LEVEL SURFACE AND HOLD STILL");
 }
 
 void Calibrator::calibrateLevel(Vector3f &acclData) {
@@ -250,13 +249,13 @@ void Calibrator::finishLevelCalibration() {
 	_isLevelCalibrating = false;
 
 	if (status != LevelCalStatus::SUCCESS) {
-		telemetry.send("$CAL,LEVEL,FAIL,%d", (int) status);
+		drone.telemetry.send("$CAL,LEVEL,FAIL,%d", (int) status);
 		return;
 	}
-	telemetry.send("$CAL,LEVEL,OK");
-	telemetry.send("$LEVELTILT,%.2f", (double) _levelCalibrator.getTiltDeg());
+	drone.telemetry.send("$CAL,LEVEL,OK");
+	drone.telemetry.send("$LEVELTILT,%.2f", (double) _levelCalibrator.getTiltDeg());
 	sendMatrix("BOARDROTATION", _boardRotation);
-	telemetry.send("$CAL,LEVEL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
+	drone.telemetry.send("$CAL,LEVEL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 }
 
 // See CALIBRATOR_ACCEL_FEED_HZ for why this exists at all.
@@ -326,7 +325,7 @@ void Calibrator::calibrateAccelerometer(Vector3f &acclData) {
 	}
 
 	if (result == AccelSampleResult::ACCEPTED_POSITION_DONE) {
-		telemetry.send("$INFO,CAPTURED %s",
+		drone.telemetry.send("$INFO,CAPTURED %s",
 				positionName(_accelerometerCalibrator.getCurrentPosition()));
 		if (!_accelerometerCalibrator.allPositionsComplete()) {
 			promptNextPosition();
@@ -361,13 +360,13 @@ void Calibrator::finishAccelCalibration() {
 	_awaitingPosition = false;
 
 	if (status != AccelCalStatus::SUCCESS) {
-		telemetry.send("$CAL,ACCL,FAIL,%d", (int) status);
+		drone.telemetry.send("$CAL,ACCL,FAIL,%d", (int) status);
 		return;
 	}
-	telemetry.send("$CAL,ACCL,OK");
+	drone.telemetry.send("$CAL,ACCL,OK");
 	sendVector("ACCLOFFSET", _accelOffset);
 	sendMatrix("ACCLMATRIX", _accelMatrix);
-	telemetry.send("$CAL,ACCL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
+	drone.telemetry.send("$CAL,ACCL,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 
 	// The sequence just ended on Z_DOWN: the airframe is upright, still, and
 	// reading (0,0,-g) -- exactly what levelling needs, and it is already
@@ -377,7 +376,7 @@ void Calibrator::finishAccelCalibration() {
 	// either way, and levelling on top of live gains is correct -- it just
 	// will not survive the reboot, which the ACCL line above already said.
 	if (chain_level) {
-		telemetry.send("$INFO,LEVELLING FROM Z_DOWN - KEEP THE AIRFRAME STILL");
+		drone.telemetry.send("$INFO,LEVELLING FROM Z_DOWN - KEEP THE AIRFRAME STILL");
 		startLevelCalibration(0.0f);
 	}
 }
@@ -388,7 +387,7 @@ void Calibrator::setAccelPosition(AccelPosition pos) {
 	}
 	_accelerometerCalibrator.startPosition(pos);
 	_awaitingPosition = false;
-	telemetry.send("$INFO,RECORDING %s - HOLD STILL", positionName(pos));
+	drone.telemetry.send("$INFO,RECORDING %s - HOLD STILL", positionName(pos));
 }
 
 void Calibrator::confirmReady() {
@@ -413,8 +412,8 @@ AccelPosition Calibrator::nextPendingPosition() const {
 
 void Calibrator::promptNextPosition() {
 	_awaitingPosition = true;
-	telemetry.send("$PROMPT,%s", positionName(nextPendingPosition()));
-	telemetry.send("$INFO,SEND READY WHEN IN POSITION AND STILL");
+	drone.telemetry.send("$PROMPT,%s", positionName(nextPendingPosition()));
+	drone.telemetry.send("$INFO,SEND READY WHEN IN POSITION AND STILL");
 }
 
 const char *Calibrator::positionName(AccelPosition pos) {
@@ -472,7 +471,7 @@ void Calibrator::finishCompassCalibration() {
 	// field, and they call for completely different responses. On a success the
 	// same numbers are a quality score -- a residual near the limit means the
 	// calibration was accepted but is not one to trust far.
-	telemetry.send("$MAGFIT,res=%.3f,max=%.2f,n=%u,bins=%u,scatter=%.2f",
+	drone.telemetry.send("$MAGFIT,res=%.3f,max=%.2f,n=%u,bins=%u,scatter=%.2f",
 			(double) _compassCalibrator.getLastFitResidual(),
 			(double) COMPASS_CAL_MAX_FIT_RESIDUAL,
 			(unsigned) _compassCalibrator.getSampleCount(),
@@ -480,13 +479,13 @@ void Calibrator::finishCompassCalibration() {
 			(double) _compassCalibrator.getScatterRatio());
 
 	if (status != CalStatus::SUCCESS) {
-		telemetry.send("$CAL,MAG,FAIL,%d", (int) status);
+		drone.telemetry.send("$CAL,MAG,FAIL,%d", (int) status);
 		return;
 	}
-	telemetry.send("$CAL,MAG,OK");
+	drone.telemetry.send("$CAL,MAG,OK");
 	sendVector("MAGOFFSET", _compassOffset);
 	sendMatrix("MAGMATRIX", _compassMatrix);
-	telemetry.send("$CAL,MAG,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
+	drone.telemetry.send("$CAL,MAG,%s", _lastSaveFailed ? "NOTSAVED" : "SAVED");
 }
 
 // Reports what is APPLIED, not what is on the device. Those are the same thing
@@ -496,39 +495,39 @@ void Calibrator::finishCompassCalibration() {
 // but failed to save is live in RAM and absent from EEPROM, which is why the
 // storage state is reported alongside.
 void Calibrator::reportCalibration() {
-	telemetry.send("$CALDUMP,storage=%s", hasStorage() ? "OK" : "NONE");
+	drone.telemetry.send("$CALDUMP,storage=%s", hasStorage() ? "OK" : "NONE");
 
-	telemetry.send("$STATUS,ACCL,%s,%s", _isAccelCalibrated ? "CAL" : "UNCAL",
+	drone.telemetry.send("$STATUS,ACCL,%s,%s", _isAccelCalibrated ? "CAL" : "UNCAL",
 			_isAccelCalibrating ? "BUSY" : "IDLE");
 	if (_isAccelCalibrated) {
 		sendVector("ACCLOFFSET", _accelOffset);
 		sendMatrix("ACCLMATRIX", _accelMatrix);
 	}
 
-	telemetry.send("$STATUS,MAG,%s,%s", _isCompassCalibrated ? "CAL" : "UNCAL",
+	drone.telemetry.send("$STATUS,MAG,%s,%s", _isCompassCalibrated ? "CAL" : "UNCAL",
 			_isCompassCalibrating ? "BUSY" : "IDLE");
 	if (_isCompassCalibrated) {
 		sendVector("MAGOFFSET", _compassOffset);
 		sendMatrix("MAGMATRIX", _compassMatrix);
 	}
 
-	telemetry.send("$STATUS,LEVEL,%s,%s", _isLevelCalibrated ? "CAL" : "UNCAL",
+	drone.telemetry.send("$STATUS,LEVEL,%s,%s", _isLevelCalibrated ? "CAL" : "UNCAL",
 			_isLevelCalibrating ? "BUSY" : "IDLE");
 	if (_isLevelCalibrated) {
 		sendMatrix("BOARDROTATION", _boardRotation);
 	}
 
-	telemetry.send("$CALDUMP,END");
+	drone.telemetry.send("$CALDUMP,END");
 }
 
 void Calibrator::sendVector(const char *key, const Vector3f &v) {
-	telemetry.send("$%s,%.5f,%.5f,%.5f", key, (double) v.x, (double) v.y,
+	drone.telemetry.send("$%s,%.5f,%.5f,%.5f", key, (double) v.x, (double) v.y,
 			(double) v.z);
 }
 
 void Calibrator::sendMatrix(const char *key, const Matrix3f &m) {
 	for (int i = 0; i < 3; i++) {
-		telemetry.send("$%s,%d,%.5f,%.5f,%.5f", key, i, (double) m.m[i][0],
+		drone.telemetry.send("$%s,%d,%.5f,%.5f,%.5f", key, i, (double) m.m[i][0],
 				(double) m.m[i][1], (double) m.m[i][2]);
 	}
 }
@@ -539,7 +538,7 @@ void Calibrator::reportProgress(const char *stage, float percent) {
 	if ((_progressThrottle++ % CALIBRATOR_PROGRESS_INTERVAL) != 0) {
 		return;
 	}
-	telemetry.send("$PROG,%s,%.1f", stage, (double) percent);
+	drone.telemetry.send("$PROG,%s,%.1f", stage, (double) percent);
 }
 
 // A stalled procedure is reported as a failure and torn down, so the caller
@@ -553,8 +552,8 @@ void Calibrator::abortStalled(const char *stage, float percent,
 	// own CANCEL had been received when nothing of the sort happened.
 	stopProcedures();
 
-	telemetry.send("$CAL,%s,FAIL,STALLED", stage);
-	telemetry.send("$INFO,NO PROGRESS AT %.0f%% - %s", (double) percent, advice);
+	drone.telemetry.send("$CAL,%s,FAIL,STALLED", stage);
+	drone.telemetry.send("$INFO,NO PROGRESS AT %.0f%% - %s", (double) percent, advice);
 }
 
 // Tear down whatever is running and drop its partial samples, silently.
@@ -582,7 +581,7 @@ bool Calibrator::stopProcedures() {
 
 void Calibrator::cancelCalibration() {
 	if (stopProcedures()) {
-		telemetry.send("$INFO,CALIBRATION CANCELLED");
+		drone.telemetry.send("$INFO,CALIBRATION CANCELLED");
 	}
 }
 
@@ -692,12 +691,12 @@ bool Calibrator::unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
 
 Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
 		Vector3f &offset, Matrix3f &matrix) {
-	if (_storage == nullptr) {
+	if (!_hasStorage) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 
 	CalibrationRecord rec;
-	if (_storage->read(location, rec) != EEPROM_StatusTypeDef::OK) {
+	if (drone.storage.read(location, rec) != EEPROM_StatusTypeDef::OK) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 	if (!unpackRecord(rec, offset, matrix)) {
@@ -708,14 +707,14 @@ Calibrator_StatusTypeDef Calibrator::loadRecord(EEPROMLocation location,
 
 Calibrator_StatusTypeDef Calibrator::saveRecord(EEPROMLocation location,
 		const Vector3f &offset, const Matrix3f &matrix) {
-	if (_storage == nullptr) {
+	if (!_hasStorage) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 
 	CalibrationRecord rec;
 	packRecord(offset, matrix, rec);
 
-	if (_storage->write(location, rec) != EEPROM_StatusTypeDef::OK) {
+	if (drone.storage.write(location, rec) != EEPROM_StatusTypeDef::OK) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 
@@ -723,7 +722,7 @@ Calibrator_StatusTypeDef Calibrator::saveRecord(EEPROMLocation location,
 	// successful transfer for the chunks that landed, so the only way to know
 	// the record is intact is to read it.
 	CalibrationRecord verify;
-	if (_storage->read(location, verify) != EEPROM_StatusTypeDef::OK) {
+	if (drone.storage.read(location, verify) != EEPROM_StatusTypeDef::OK) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 	if (memcmp(&rec, &verify, sizeof(rec)) != 0) {
@@ -777,7 +776,7 @@ Calibrator_StatusTypeDef Calibrator::clearStoredCalibration() {
 	_boardRotation = Matrix3f::identity();
 	noteGainsChanged();
 
-	if (_storage == nullptr) {
+	if (!_hasStorage) {
 		return Calibrator_StatusTypeDef::ERROR;
 	}
 
@@ -786,11 +785,11 @@ Calibrator_StatusTypeDef Calibrator::clearStoredCalibration() {
 	CalibrationRecord blank;
 	memset(&blank, 0, sizeof(blank));
 
-	bool ok = (_storage->write(EEPROMLocation::ACCLCALIBRATEDAT, blank)
+	bool ok = (drone.storage.write(EEPROMLocation::ACCLCALIBRATEDAT, blank)
 			== EEPROM_StatusTypeDef::OK);
-	ok = (_storage->write(EEPROMLocation::COMPASSCALIBRATEDAT, blank)
+	ok = (drone.storage.write(EEPROMLocation::COMPASSCALIBRATEDAT, blank)
 			== EEPROM_StatusTypeDef::OK) && ok;
-	ok = (_storage->write(EEPROMLocation::BOARDLEVELCALIBRATEDAT, blank)
+	ok = (drone.storage.write(EEPROMLocation::BOARDLEVELCALIBRATEDAT, blank)
 			== EEPROM_StatusTypeDef::OK) && ok;
 
 	return ok ? Calibrator_StatusTypeDef::OK : Calibrator_StatusTypeDef::ERROR;

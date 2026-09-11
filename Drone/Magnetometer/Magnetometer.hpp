@@ -10,8 +10,6 @@
 
 #include "LIS3MDL.hpp"
 
-class Calibrator;
-
 /*
  * Frontend for the LIS3MDL. Same contract as Imu: update() reads once,
  * rotates into the body frame, applies the stored hard/soft-iron correction
@@ -26,7 +24,6 @@ public:
 	Magnetometer();
 
 	MAG_StatusTypeDef init(void);
-	void setCalibrator(Calibrator *cal);
 
 	void update(void);
 	MAG_StatusTypeDef getData(LIS3MDL_Data &data);
@@ -50,7 +47,6 @@ private:
 	// the pre-correction value is gone by the time anyone could ask for it.
 	Vector3f _raw_field;
 
-	Calibrator *_calibrator;
 	MAG_StatusTypeDef _status;
 	bool _hasData;
 
@@ -61,8 +57,5 @@ private:
 	// this to us -- see LIS3MDL::readData().
 	static Vector3f remapMag(const Vector3f &v);
 };
-
-// The one magnetometer. Defined in Globals.cpp.
-extern Magnetometer magnetometer;
 
 #endif /* MAGNETOMETER_MAGNETOMETER_HPP_ */

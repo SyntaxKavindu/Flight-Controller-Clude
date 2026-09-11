@@ -6,7 +6,10 @@
  */
 
 #include "Telemetry.hpp"
-#include "Calibrator.hpp"
+#include "Drone.hpp"   // drone.calibrator, and the diagnostics/stream entry
+                       // points -- Drone.hpp includes this header, but a .cpp
+                       // including both is not a cycle: the include guard has
+                       // already completed Telemetry by the time it is reached."
 
 #include <cstdio>
 #include <cstdarg>
@@ -17,17 +20,11 @@
 // while the previous packet is still in flight.
 extern "C" uint8_t CDC_Transmit_FS(uint8_t *Buf, uint16_t Len);
 
-// Implemented in Drone.cpp. Declared here rather than by including Drone.hpp,
-// which would be circular: Drone.hpp pulls in Globals.hpp, which pulls in this
-// header.
-void Drone_ReportDiagnostics(void);
-void Drone_SetStreamMode(int mode);
-
 extern "C" void Telemetry_Receive(const uint8_t *data, uint32_t len) {
 	if (data == nullptr) {
 		return;
 	}
-	telemetry.receive(reinterpret_cast<const char*>(data), (uint16_t) len);
+	drone.telemetry.receive(reinterpret_cast<const char*>(data), (uint16_t) len);
 }
 
 namespace {
@@ -188,7 +185,7 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 	// Every procedure, not just the two the original checks knew about. A
 	// levelling run left out of this was startable on top of an accelerometer
 	// calibration, and CANCEL answered "$NAK,IDLE" while one was in progress.
-	const bool busy = calibrator.isCalibrating();
+	const bool busy = drone.calibrator.isCalibrating();
 
 	if (tokenEquals(name, "CALIMU")) {
 		// The six-position sequence ends on Z_DOWN, which IS the levelling
@@ -203,14 +200,14 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		}
 		if (busy) { send("$NAK,%s,BUSY", echo); return; }
 		send("$ACK,%s", echo);
-		calibrator.startAccelerometerCalibration(level);
+		drone.calibrator.startAccelerometerCalibration(level);
 		return;
 	}
 
 	if (tokenEquals(name, "CALMAG")) {
 		if (busy) { send("$NAK,%s,BUSY", echo); return; }
 		send("$ACK,%s", echo);
-		calibrator.startCompassCalibration();
+		drone.calibrator.startCompassCalibration();
 		return;
 	}
 
@@ -235,28 +232,28 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 			yaw_deg = parsed;
 		}
 		send("$ACK,%s", echo);
-		calibrator.startLevelCalibration(yaw_deg);
+		drone.calibrator.startLevelCalibration(yaw_deg);
 		return;
 	}
 
 	if (tokenEquals(name, "READY")) {
-		if (!calibrator.isAwaitingPosition()) { send("$NAK,%s,NOTWAITING", echo); return; }
+		if (!drone.calibrator.isAwaitingPosition()) { send("$NAK,%s,NOTWAITING", echo); return; }
 		send("$ACK,%s", echo);
-		calibrator.confirmReady();
+		drone.calibrator.confirmReady();
 		return;
 	}
 
 	if (tokenEquals(name, "CANCEL")) {
 		if (!busy) { send("$NAK,%s,IDLE", echo); return; }
 		send("$ACK,%s", echo);
-		calibrator.cancelCalibration();
+		drone.calibrator.cancelCalibration();
 		return;
 	}
 
 	if (tokenEquals(name, "CALCLEAR")) {
 		if (busy) { send("$NAK,%s,BUSY", echo); return; }
 		send("$ACK,%s", echo);
-		if (calibrator.clearStoredCalibration() == Calibrator_StatusTypeDef::OK) {
+		if (drone.calibrator.clearStoredCalibration() == Calibrator_StatusTypeDef::OK) {
 			send("$INFO,STORED CALIBRATION ERASED");
 		} else {
 			send("$ERR,ERASE FAILED (NO STORAGE?)");
@@ -268,7 +265,7 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		// Deliberately answerable at any time, calibrating or not: it exists
 		// for the case where nothing else is talking.
 		send("$ACK,%s", echo);
-		Drone_ReportDiagnostics();
+		drone.reportDiagnostics();
 		return;
 	}
 
@@ -291,7 +288,7 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 			return;
 		}
 		send("$ACK,%s", echo);
-		Drone_SetStreamMode(mode);
+		drone.setStreamMode((DroneStreamMode) mode);
 		// A header line, so the plotting tool can confirm it is reading the
 		// stream it asked for rather than inferring it from the first sample.
 		send("$STREAM,MODE,%d", mode);
@@ -302,18 +299,18 @@ void Telemetry::dispatchLine(char *line, uint16_t len) {
 		// Answerable at any time, calibrating or not: knowing what is applied
 		// right now is most useful precisely when something is going wrong.
 		send("$ACK,%s", echo);
-		calibrator.reportCalibration();
+		drone.calibrator.reportCalibration();
 		return;
 	}
 
 	if (tokenEquals(name, "CALSTATUS")) {
 		send("$ACK,%s", echo);
-		send("$STATUS,ACCL,%s,%s", calibrator.isAcclCalibrated() ? "CAL" : "UNCAL",
-				calibrator.isAcclCalibrating() ? "BUSY" : "IDLE");
-		send("$STATUS,MAG,%s,%s", calibrator.isCompassCalibrated() ? "CAL" : "UNCAL",
-				calibrator.isCompassCalibrating() ? "BUSY" : "IDLE");
-		send("$STATUS,LEVEL,%s,%s", calibrator.isLevelCalibrated() ? "CAL" : "UNCAL",
-				calibrator.isLevelCalibrating() ? "BUSY" : "IDLE");
+		send("$STATUS,ACCL,%s,%s", drone.calibrator.isAcclCalibrated() ? "CAL" : "UNCAL",
+				drone.calibrator.isAcclCalibrating() ? "BUSY" : "IDLE");
+		send("$STATUS,MAG,%s,%s", drone.calibrator.isCompassCalibrated() ? "CAL" : "UNCAL",
+				drone.calibrator.isCompassCalibrating() ? "BUSY" : "IDLE");
+		send("$STATUS,LEVEL,%s,%s", drone.calibrator.isLevelCalibrated() ? "CAL" : "UNCAL",
+				drone.calibrator.isLevelCalibrating() ? "BUSY" : "IDLE");
 		return;
 	}
 

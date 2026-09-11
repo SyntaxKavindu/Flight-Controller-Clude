@@ -127,8 +127,4 @@ private:
     M24C02 _storage;
 };
 
-
-// The one EEPROM. Defined in Globals.cpp.
-extern EEPROM storage;
-
 #endif /* EEPROM_EEPROM_HPP_ */

@@ -64,7 +64,4 @@ private:
 	bool isPlausible(const BMP390_Data &sample) const;
 };
 
-// The one barometer. Defined in Globals.cpp.
-extern Barometer barometer;
-
 #endif /* BAROMETER_BAROMETER_HPP_ */

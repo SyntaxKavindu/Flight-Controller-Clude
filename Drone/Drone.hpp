@@ -4,9 +4,19 @@
  *  Created on: Aug 25, 2026
  *      Author: KAVINDU
  *
- * Top level of the flight stack. Owns the state estimator and runs the
- * sense -> estimate -> report cycle; everything else it works through is a
- * global (see Globals.hpp).
+ * Top level of the flight stack, and the OWNER of everything in it.
+ *
+ * There is exactly one Drone, the global `drone`, and every subsystem is a
+ * value member of it. Nothing else in the project defines a sensor, the
+ * calibrator, the link or the storage -- so `drone.imu`, `drone.telemetry` and
+ * `drone.calibrator` are not merely the preferred route to them, they are the
+ * ONLY route. There is no other name to reach them by, because no other object
+ * exists.
+ *
+ * That also means no dependency injection anywhere: Imu does not hold a
+ * Calibrator pointer handed to it at boot, it simply uses `drone.calibrator`.
+ * The wiring step that used to live in Globals_Init() has no work left to do,
+ * and is gone with the file.
  *
  * Wiring it up
  * ------------
@@ -14,9 +24,10 @@
  *
  *     #include "Drone.hpp"
  *
- *     static Drone drone;   // static, not a local in main(): it carries the
- *                           // ESEKF's 15x15 covariance and process noise,
- *                           // about 2 kB that has no business on the stack.
+ *     // No object is declared here: Drone.cpp defines the one `drone`. A
+ *     // second would not compile -- the copy constructor is deleted -- which
+ *     // is deliberate, since two would mean two estimators, with the loop
+ *     // advancing one while telemetry reported the other.
  *
  *     int main(void)
  *     {
@@ -57,7 +68,18 @@
 #define DRONE_HPP_
 
 #include "ESEKF.hpp"
-#include "Globals.hpp"
+
+// Every subsystem, because Drone holds them BY VALUE and a value member needs
+// the complete type. That makes this header heavy -- it is the one place in
+// the project that knows about everything -- and that is the trade: one owner,
+// one construction order, and `drone.imu` as the only way to reach anything.
+#include "Barometer.hpp"
+#include "Calibrator.hpp"
+#include "EEPROM.hpp"
+#include "Imu.hpp"
+#include "Indicator.hpp"
+#include "Magnetometer.hpp"
+#include "Telemetry.hpp"
 
 // ===========================================================================
 // MAGNETIC DECLINATION -- EDIT HERE, AND ONLY HERE
@@ -81,6 +103,18 @@
 // What the raw/corrected sample stream is currently emitting. Values are part
 // of the wire protocol -- tools/stream_plot.py and the STREAM command both
 // name them -- so do not renumber them.
+// Which devices failed to come up, OR'd together. 0 means everything is up.
+// A failing device does not stop the rest: an airframe with a dead barometer
+// should still come up far enough to say so over telemetry. init() records
+// what did not start; the caller decides whether that is flyable.
+enum DroneInitStatus : uint8_t {
+	DRONE_INIT_OK           = 0x00,
+	DRONE_INIT_STORAGE_FAIL = 0x01,
+	DRONE_INIT_IMU_FAIL     = 0x02,
+	DRONE_INIT_MAG_FAIL     = 0x04,
+	DRONE_INIT_BARO_FAIL    = 0x08
+};
+
 enum DroneStreamMode {
 	DRONE_STREAM_OFF   = 0,
 	DRONE_STREAM_ACCEL = 1,
@@ -237,8 +271,36 @@ class Drone {
 public:
 	Drone();
 
-	// Brings up the globals and configures the estimator. Call once.
+	// THE vehicle owns exactly one of each. A copy would carry a second
+	// estimator and a second set of loop counters, so the flight loop would
+	// advance one object while telemetry reported the other -- a failure with
+	// no symptom except an estimator that never converges.
+	Drone(const Drone &) = delete;
+	Drone &operator=(const Drone &) = delete;
+
+	// Every subsystem, by value, PUBLIC. `drone.imu` is the only route to any
+	// of them -- there is no separate global to reach instead, because these
+	// objects have no existence outside this one.
+	//
+	// Declaration order IS construction order, and it is dependency-first:
+	// storage before calibrator (which restores from it), calibrator before
+	// the sensors (which correct through it). No constructor here touches
+	// another member, so the order is not load bearing today -- it is kept
+	// obvious so that it stays checkable if one ever does.
+	EEPROM       storage;
+	Telemetry    telemetry;
+	Calibrator   calibrator;
+	Imu          imu;
+	Magnetometer magnetometer;
+	Barometer    barometer;
+	Indicator    indicator;
+
+	// Brings up every subsystem and configures the estimator. Call once,
+	// AFTER the SPI, I2C and USB peripherals exist. Returns nothing; what
+	// failed is in getInitStatus().
 	void init(void);
+
+	uint8_t getInitStatus(void) const { return _bootStatus; }
 
 	// Call it in a tight while(1). Every group -- command polling, fast, mid,
 	// publish, slow -- is dispatched off HAL_GetTick() when its period comes
@@ -261,7 +323,7 @@ public:
 private:
 	ESEKF _esekf;
 
-	uint8_t _bootStatus;        // GlobalsInitStatus bitmask from init()
+	uint8_t _bootStatus;        // DroneInitStatus bitmask from init()
 	uint32_t _lastPredictTick;  // HAL_GetTick() at the last integrated step
 	uint32_t _lastFastTick;
 	uint32_t _lastPollTick;
@@ -338,15 +400,13 @@ private:
 	void publishState(void);
 };
 
-// Free function so Telemetry can reach the diagnostics without including this
-// header -- Drone.hpp pulls in Globals.hpp, which pulls in Telemetry.hpp.
-// There is exactly one Drone; init() binds it.
-void Drone_ReportDiagnostics(void);
-
-// Telemetry's STREAM command reaches the stream through this, for the same
-// reason DIAG does: Telemetry.hpp cannot include Drone.hpp without a cycle.
-// Takes a DroneStreamMode; typed as int so the shim stays declarable from a
-// unit that has not seen the enum.
-void Drone_SetStreamMode(int mode);
+// The vehicle. Defined in Drone.cpp; everything reaches everything through it.
+//
+// At namespace scope, NOT a local: it carries the estimator, every subsystem
+// and the compass sample arena -- about 10 kB, against a stack that CubeMX
+// sizes at 1-2 kB by default. As a local in main() it would overflow the stack
+// several times over, and the symptom would be a hard fault at a random point
+// rather than anything that names the cause.
+extern Drone drone;
 
 #endif /* DRONE_HPP_ */

@@ -6,7 +6,7 @@
  */
 
 #include "Magnetometer.hpp"
-#include "Calibrator.hpp"
+#include "Drone.hpp"   // drone.calibrator -- the only route to it
 #include "spi.h"
 
 // ===========================================================================
@@ -47,7 +47,7 @@ Vector3f Magnetometer::remapMag(const Vector3f &v) { return remapBoardAxes(v); }
 
 Magnetometer::Magnetometer() :
 		_sensor { &hspi3, SPI3_CS_GPIO_Port, SPI3_CS_Pin }, _data { },
-		_raw_field { }, _calibrator { nullptr },
+		_raw_field { },
 		_status { MAG_StatusTypeDef::ERROR },
 		_hasData { false } {
 }
@@ -58,13 +58,6 @@ MAG_StatusTypeDef Magnetometer::init(void) {
 	_status = MAG_StatusTypeDef::ERROR;
 	_hasData = false;
 	return _sensor.init();
-}
-
-// Parameter deliberately not named `calibrator`: that is the global, and
-// shadowing it here would let a later edit inside this function reach the
-// global by accident while looking correct.
-void Magnetometer::setCalibrator(Calibrator *cal) {
-	_calibrator = cal;
 }
 
 void Magnetometer::update(void) {
@@ -83,17 +76,17 @@ void Magnetometer::update(void) {
 	// getRawField().
 	_raw_field = field;
 
-	if (_calibrator != nullptr) {
-		if (_calibrator->isCompassCalibrating()) {
-			_calibrator->calibrateCompass(field);
+	{
+		if (drone.calibrator.isCompassCalibrating()) {
+			drone.calibrator.calibrateCompass(field);
 		}
 		// Hard/soft-iron correction in the sensor's own axes first, then the
 		// board rotation -- the same order, and for the same reason, as the
 		// accelerometer path in Imu::update(). The magnetometer is on the same
 		// board as the IMU, so it takes the same rotation; leaving it out would
 		// put heading in a different frame from roll and pitch.
-		_calibrator->correctCompassData(field);
-		_calibrator->correctBoardFrame(field);
+		drone.calibrator.correctCompassData(field);
+		drone.calibrator.correctBoardFrame(field);
 	}
 
 	sample.x = field.x;

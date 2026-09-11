@@ -8,8 +8,8 @@
  */
 #include "Drone.hpp"
 
-static Drone drone;
-
+// No object is declared here any more: Drone.cpp defines the one `drone`, and
+// a second would be a compile error rather than a silently divergent estimator.
 int main(void)
 {
     drone.init();
