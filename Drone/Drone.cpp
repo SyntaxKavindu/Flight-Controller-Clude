@@ -6,6 +6,8 @@
  */
 
 #include "Drone.hpp"
+#include "i2c.h"    // hi2c3, for the EEPROM
+#include "main.h"   // SYSTEM_*/ARM_*/GPS_* indicator pin labels
 
 #include <math.h>   // acosf, fabsf, sqrtf
 
@@ -59,12 +61,35 @@ constexpr float ESEKF_NEVER_RESET = -1000.0f;
 
 // There is exactly one Drone (main.cpp holds it static), so a file-scope
 // pointer is all the binding the DIAG shim needs. init() sets it.
-Drone *g_drone = nullptr;
 
 } // namespace
 
 Drone::Drone() :
-		_esekf { }, _bootStatus { GLOBALS_INIT_OK }, _lastPredictTick { 0 },
+		// Subsystems first, in declaration order. Only two take construction
+		// arguments; the rest are default-constructed and configured in init().
+		storage { &hi2c3 },
+		telemetry { }, calibrator { }, imu { }, magnetometer { }, barometer { },
+		indicator {
+			// ===============================================================
+			// INDICATOR LEDS -- EDIT HERE, AND ONLY HERE
+			//
+			// From CubeMX's main.h, the same way the SPI chip selects are.
+			// The third field is ACTIVE HIGH; getting it wrong inverts every
+			// pattern, so a healthy airframe would light SOLID instead of
+			// resting dark. The lamp test is the check: all three ON for the
+			// first 0.7 s after power-up.
+			//
+			// !! PC13/14/15 are BACKUP-DOMAIN pins with limited output drive.
+			// !! An LED sized for a normal 10-20 mA direct drive is likely out
+			// !! of spec; the symptom is a dim LED, not a dead one. PC14/PC15
+			// !! are also OSC32_IN/OSC32_OUT -- free only because the LSE is
+			// !! not enabled, and enabling it later takes ARM and GPS with it.
+			// ===============================================================
+			{ SYSTEM_GPIO_Port, SYSTEM_Pin, true },   // PC13
+			{ ARM_GPIO_Port,    ARM_Pin,    true },   // PC15
+			{ GPS_GPIO_Port,    GPS_Pin,    true }    // PC14
+		},
+		_esekf { }, _bootStatus { DRONE_INIT_OK }, _lastPredictTick { 0 },
 		_lastFastTick { 0 }, _lastPollTick { 0 }, _pollSkipped { 0 },
 		_lastMidTick { 0 },
 		_lastStreamTick { 0 }, _streamMode { DRONE_STREAM_OFF },
@@ -79,8 +104,42 @@ Drone::Drone() :
 		_publishCount { 0 } {
 }
 
+// THE vehicle. At namespace scope so its ~10 kB lands in .bss rather than on
+// a 1-2 kB stack -- see the note at the declaration in Drone.hpp.
+Drone drone;
+
 void Drone::init(void) {
-	_bootStatus = Globals_Init();
+	_bootStatus = DRONE_INIT_OK;
+
+	// FIRST, before anything that can fail. The lamp test it starts is the only
+	// signal an operator gets from a board whose telemetry never comes up, and a
+	// device probe below is exactly the kind of thing that can hang -- so the
+	// LEDs must already be lit by then, not waiting behind it.
+	//
+	// It cannot fail: a GPIO write has nothing to report, so there is no status
+	// bit for it. What a dead LED looks like is covered by the lamp test.
+	indicator.init();
+
+	// Storage first: the calibrator restores its stored gains from it. On a
+	// failure the calibrator is told to run WITHOUT storage rather than handed
+	// a dead device, so it reports "not saved" instead of retrying a broken bus
+	// on every single calibration.
+	const bool storage_ok = (storage.init() == EEPROM_StatusTypeDef::OK);
+	if (!storage_ok) {
+		_bootStatus |= DRONE_INIT_STORAGE_FAIL;
+	}
+	calibrator.init(storage_ok);
+
+	if (imu.init() != IMU_StatusTypeDef::OK) {
+		_bootStatus |= DRONE_INIT_IMU_FAIL;
+	}
+	if (magnetometer.init() != MAG_StatusTypeDef::OK) {
+		_bootStatus |= DRONE_INIT_MAG_FAIL;
+	}
+	if (barometer.init() != BARO_StatusTypeDef::OK) {
+		_bootStatus |= DRONE_INIT_BARO_FAIL;
+	}
+
 	reportBootStatus();
 
 	// Must be set before the estimator is seeded: initialize() builds the NED
@@ -141,23 +200,21 @@ void Drone::init(void) {
 	// a LATER change has to force a re-seed.
 	_calibrationEpoch = calibrator.getCalibrationEpoch();
 
-	// Bind the DIAG shim -- see Drone_ReportDiagnostics() at the bottom.
-	g_drone = this;
 }
 
 void Drone::reportBootStatus(void) {
-	telemetry.send("$BOOT,%s", (_bootStatus == GLOBALS_INIT_OK) ? "OK" : "DEGRADED");
+	telemetry.send("$BOOT,%s", (_bootStatus == DRONE_INIT_OK) ? "OK" : "DEGRADED");
 
-	if (_bootStatus & GLOBALS_INIT_STORAGE_FAIL) {
+	if (_bootStatus & DRONE_INIT_STORAGE_FAIL) {
 		telemetry.send("$ERR,EEPROM INIT FAILED - CALIBRATION WILL NOT PERSIST");
 	}
-	if (_bootStatus & GLOBALS_INIT_IMU_FAIL) {
+	if (_bootStatus & DRONE_INIT_IMU_FAIL) {
 		telemetry.send("$ERR,IMU INIT FAILED");
 	}
-	if (_bootStatus & GLOBALS_INIT_MAG_FAIL) {
+	if (_bootStatus & DRONE_INIT_MAG_FAIL) {
 		telemetry.send("$ERR,MAGNETOMETER INIT FAILED");
 	}
-	if (_bootStatus & GLOBALS_INIT_BARO_FAIL) {
+	if (_bootStatus & DRONE_INIT_BARO_FAIL) {
 		telemetry.send("$ERR,BAROMETER INIT FAILED");
 	}
 
@@ -490,7 +547,7 @@ void Drone::reportEstimatorHealth(void) {
 //     indicator.setGPSState(gps.isFix() ? GPSState::LOCKED
 //                                       : GPSState::UNLOCKED);
 void Drone::updateIndicator(void) {
-	const bool device_failed = (_bootStatus != GLOBALS_INIT_OK);
+	const bool device_failed = (_bootStatus != DRONE_INIT_OK);
 	const bool unrecoverable = _esekf.hasDiverged();
 	const bool repaired_fault = (_esekf.getFaultCount() != 0u);
 	const bool no_attitude = !_esekf.isInitialized()
@@ -820,20 +877,4 @@ void Drone::reportDiagnostics(void) {
 			(unsigned) (st.vert_pos_valid ? 1 : 0),
 			(unsigned) (st.mag_aiding ? 1 : 0),
 			(unsigned) (calibrator.isCalibrating() ? 1 : 0));
-}
-
-void Drone_SetStreamMode(int mode) {
-	if (g_drone == nullptr) {
-		telemetry.send("$ERR,NO DRONE BOUND");
-		return;
-	}
-	g_drone->setStreamMode((DroneStreamMode) mode);
-}
-
-void Drone_ReportDiagnostics(void) {
-	if (g_drone == nullptr) {
-		telemetry.send("$DIAG,NO DRONE BOUND");
-		return;
-	}
-	g_drone->reportDiagnostics();
 }

@@ -26,8 +26,12 @@ ESEKF_SRC := $(ROOT)/Drone/Ahrs/ESEKF.cpp
 CAL_SRC   := $(ROOT)/Drone/Calibrators/AccelerometerCalibrator.cpp \
              $(ROOT)/Drone/Calibrators/CompassCalibrator.cpp \
              $(ROOT)/Drone/Calibrators/LevelCalibrator.cpp
+# Drone.cpp is now part of the stack, not an extra: `drone` IS the globals, so
+# anything that touches a subsystem needs it. That is the cost of dropping
+# dependency injection, and it is why `integ` and `firmware` now link the same
+# set. `cal` and `ctrl` below are unaffected -- those classes never name `drone`.
 STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
-             $(ROOT)/Drone/Globals.cpp $(ROOT)/Drone/Imu/Imu.cpp \
+             $(ROOT)/Drone/Drone.cpp $(ROOT)/Drone/Imu/Imu.cpp \
              $(ROOT)/Drone/Indicator/Indicator.cpp \
              $(ROOT)/Drone/Magnetometer/Magnetometer.cpp \
              $(ROOT)/Drone/Barometer/Barometer.cpp \
@@ -87,7 +91,7 @@ indicator: | $(BUILD)
 # change that compiles in isolation but breaks the real build is caught here.
 firmware: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/firmware firmware_link.cpp \
-		$(ROOT)/Drone/Drone.cpp $(STACK_SRC)
+		$(STACK_SRC)
 	@$(BUILD)/firmware && echo "firmware: links and runs"
 
 compileall:

@@ -27,7 +27,7 @@
  *     wrong pin, or a hung loop, so darkness is reserved for meaning exactly
  *     that. See the pattern table.
  *
- * Wiring lives at the definition of the global `indicator` in Globals.cpp.
+ * Wiring lives in Drone's constructor, where `drone.indicator` is built.
  */
 
 #ifndef INDICATOR_INDICATOR_HPP_
@@ -174,8 +174,5 @@ private:
 	// Write a level, skipping the GPIO if it already holds it.
 	void drive(Output &o, bool on);
 };
-
-// The one indicator. Defined in Globals.cpp, which is also where the pins are.
-extern Indicator indicator;
 
 #endif /* INDICATOR_INDICATOR_HPP_ */

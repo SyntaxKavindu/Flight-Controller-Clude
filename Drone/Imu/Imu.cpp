@@ -6,7 +6,7 @@
  */
 
 #include "Imu.hpp"
-#include "Calibrator.hpp"
+#include "Drone.hpp"   // drone.calibrator -- the only route to it
 #include "spi.h"
 
 // ===========================================================================
@@ -53,7 +53,7 @@ Vector3f Imu::remapGyro(const Vector3f &v) { return remapBoardAxes(v); }
 
 Imu::Imu() :
 		_sensor { &hspi1, SPI1_CS_GPIO_Port, SPI1_CS_Pin }, _data { },
-		_raw_accel { }, _calibrator { nullptr },
+		_raw_accel { },
 		_status { IMU_StatusTypeDef::ERROR },
 		_hasData { false } {
 }
@@ -69,13 +69,6 @@ IMU_StatusTypeDef Imu::init(void) {
 	// Report what the driver actually says rather than an unconditional OK --
 	// a caller has no other way to find out the sensor never came up.
 	return _sensor.init();
-}
-
-// Parameter deliberately not named `calibrator`: that is the global, and
-// shadowing it here would let a later edit inside this function reach the
-// global by accident while looking correct.
-void Imu::setCalibrator(Calibrator *cal) {
-	_calibrator = cal;
 }
 
 void Imu::update(void) {
@@ -96,7 +89,7 @@ void Imu::update(void) {
 	// getRawAccel().
 	_raw_accel = sample.accel;
 
-	if (_calibrator != nullptr) {
+	{
 		// While a procedure is running this is the only place raw samples come
 		// from, so feed it here, BEFORE any correction. Both procedures want the
 		// raw reading: the accelerometer fit is what produces the correction, and
@@ -107,17 +100,17 @@ void Imu::update(void) {
 		// They are mutually exclusive -- Calibrator::beginProcedure() refuses to
 		// start one while another runs -- so `else if` is not merely an
 		// optimisation, it states that.
-		if (_calibrator->isAcclCalibrating()) {
-			_calibrator->calibrateAccelerometer(sample.accel);
-		} else if (_calibrator->isLevelCalibrating()) {
-			_calibrator->calibrateLevel(sample.accel);
+		if (drone.calibrator.isAcclCalibrating()) {
+			drone.calibrator.calibrateAccelerometer(sample.accel);
+		} else if (drone.calibrator.isLevelCalibrating()) {
+			drone.calibrator.calibrateLevel(sample.accel);
 		}
 
 		// Sensor correction first (bias and scale, in the accelerometer's own
 		// axes), then the board rotation. The two do not commute: the fit was
 		// made in the axes the chip actually reads in, so rotating first would
 		// apply per-axis gains to axes they were not measured on.
-		_calibrator->correctAcclData(sample.accel);
+		drone.calibrator.correctAcclData(sample.accel);
 
 		// The board rotation describes the BOARD, so it goes on the gyro too.
 		// Correcting one and not the other leaves them disagreeing about which
@@ -126,8 +119,8 @@ void Imu::update(void) {
 		// that drifts only under motion, which is the hardest failure to spot.
 		// There is no gyro path through the Calibrator for exactly this reason;
 		// see the note on Calibrator::correctBoardFrame().
-		_calibrator->correctBoardFrame(sample.accel);
-		_calibrator->correctBoardFrame(sample.gyro);
+		drone.calibrator.correctBoardFrame(sample.accel);
+		drone.calibrator.correctBoardFrame(sample.gyro);
 	}
 
 	_data = sample;

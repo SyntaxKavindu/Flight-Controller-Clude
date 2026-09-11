@@ -171,8 +171,4 @@ private:
 	void dispatchLine(char *line, uint16_t len);
 };
 
-// The one link. Calibrator reports through it; TelemetryCBridge feeds it.
-// Defined in Globals.cpp.
-extern Telemetry telemetry;
-
 #endif /* TELEMETRY_TELEMETRY_HPP_ */

@@ -10,8 +10,6 @@
 
 #include "ICM42688P.hpp"
 
-class Calibrator;
-
 /*
  * Frontend for the ICM42688P.
  *
@@ -31,10 +29,6 @@ public:
 	Imu();
 
 	IMU_StatusTypeDef init(void);
-
-	// Optional. With no calibrator attached the raw (remapped) sample is
-	// stored unmodified, which is exactly what an uncalibrated airframe wants.
-	void setCalibrator(Calibrator *cal);
 
 	void update(void);
 	IMU_StatusTypeDef getData(IMU_Data &data);
@@ -61,7 +55,6 @@ private:
 	// pre-correction value is otherwise gone before anyone can ask.
 	Vector3f _raw_accel;
 
-	Calibrator *_calibrator;
 	IMU_StatusTypeDef _status;
 	bool _hasData;
 
@@ -75,8 +68,5 @@ private:
 	static Vector3f remapAccel(const Vector3f &v);
 	static Vector3f remapGyro(const Vector3f &v);
 };
-
-// The one IMU. Defined in Globals.cpp.
-extern Imu imu;
 
 #endif /* IMU_IMU_HPP_ */
