@@ -13,7 +13,7 @@ cd tests && make
 | `make cal`   | The three calibration engines, driven directly |
 | `make integ` | The `Calibrator` facade, the sensor frontends, the EEPROM record |
 | `make indicator` | The status panel: pattern rendering, lamp test, phase handling, GPIO write suppression |
-| `make ctrl` | `PID`, `Position`, `Velocity`: control law, limits, degeneracy, bad input |
+| `make ctrl` | `PID`, `Position`, `Velocity`, `Attitude`: control law, limits, degeneracy, bad input |
 | `make firmware` | Links the whole stack including `Drone.cpp` and runs `loop()` |
 
 `make cal` links **only** `AccelerometerCalibrator`, `CompassCalibrator` and
@@ -43,6 +43,9 @@ on the bench.
   specific force, so the axis pointing *up* reads `+1 g`.
 - Earth frame **NED**, down positive; gravity is `(0, 0, +9.80665)`.
 - `AccelPosition::Z_UP` means body +Z points at the sky, i.e. **inverted**.
+- Attitude quaternions are **body -> NED**, and Euler triples are **ZYX**
+  (yaw, then pitch, then roll) — the estimator's convention, and the one every
+  angle in the control cascade is written in.
 
 `tests/test.hpp` has helpers (`phys::restAccel`, `phys::bodyField`) that build
 samples in these conventions; use them rather than hand-rolling signs.
