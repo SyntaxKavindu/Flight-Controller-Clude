@@ -13,14 +13,17 @@ cd tests && make
 | `make cal`   | The three calibration engines, driven directly |
 | `make integ` | The `Calibrator` facade, the sensor frontends, the EEPROM record |
 | `make indicator` | The status panel: pattern rendering, lamp test, phase handling, GPIO write suppression |
-| `make ctrl` | `PID`, `Position`, `Velocity`, `Attitude`: control law, limits, degeneracy, bad input |
+| `make ctrl` | `PID`, `Position`, `Velocity`, `Attitude`, `Rate`: control law, limits, degeneracy, bad input, and the four loops flown together in 6-DOF |
 | `make firmware` | Links the whole stack including `Drone.cpp` and runs `loop()` |
 
 `make cal` links **only** `AccelerometerCalibrator`, `CompassCalibrator` and
 `LevelCalibrator` — no facade, no HAL, no `stub/`. If that link ever starts
 needing `stub/`, a board dependency has crept back into a class that is meant to
 be portable. `make ctrl` links no `stub/` either, for the same reason: the
-control law takes `dt` as a parameter and touches no peripheral.
+control law takes `dt` as a parameter and touches no peripheral. `Rate` sits
+right above the mixer and still holds that line — it takes the mixer's
+saturation report as two `bool`s rather than including `Motors.hpp`, which
+would drag the ESC driver and the HAL into the control law.
 
 ## What these do and do not prove
 

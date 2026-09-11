@@ -1,5 +1,5 @@
 /*
- * The control cascade's implemented half: PID, Position, Velocity, Attitude.
+ * The control cascade: PID, Position, Velocity, Attitude, Rate.
  *
  * Written against the PHYSICS rather than against the implementation wherever
  * possible -- a test that restates the code cannot catch the code being wrong.
@@ -9,6 +9,7 @@
 #include "Attitude.hpp"
 #include "PID.hpp"
 #include "Position.hpp"
+#include "Rate.hpp"
 #include "Velocity.hpp"
 #include "test.hpp"
 
@@ -33,6 +34,12 @@ float settle(PID &pid, float target, float meas, int n, float dt)
     for (int i = 0; i < n; i++) out = pid.update(target, meas, dt);
     return out;
 }
+
+// Angular acceleration a rigid body gets from one unit of normalised torque,
+// rad/s^2. A plausible mid-size multirotor -- the rate loop's gains are only
+// meaningful against a plant, and this is the plant every closed-loop check
+// below flies.
+const float PLANT_K = 100.0f;
 
 // ---- Attitude helpers ----
 // An attitude from ZYX Euler angles, computed HERE rather than borrowed from
@@ -1090,6 +1097,432 @@ int main()
         // I and D are off, and stay off unless someone means it.
         checkNear(att.getRollPID().getKi(), 0.0f, 1e-9f, "the angle loop has no integrator");
         checkNear(att.getRollPID().getKd(), 0.0f, 1e-9f, "and no derivative");
+    }
+
+    // =====================================================================
+    section("Rate: the terms, against a rigid body");
+    // =====================================================================
+    {
+        // A disturbance torque -- a battery taped off centre, a bent arm, a
+        // motor down a few percent. P cannot remove it: a proportional
+        // controller needs an error to produce the very output that cancels
+        // one, so it settles wherever those two balance. The residual is
+        // exactly disturbance / P, and that is the whole argument for putting
+        // the integrator in this loop.
+        const float dist = -0.08f;      // output units of standing bias
+        Rate p_only;
+        p_only.reset();
+        p_only.setRollGains(RATE_ROLL_P, 0.0f, RATE_ROLL_D);
+        float w = 0.0f;
+        for (int i = 0; i < 4000; i++) {          // 10 s
+            p_only.setRateTarget(Vector3f(3.0f, 0, 0));
+            p_only.update(Vector3f(w, 0, 0), dt);
+            w += PLANT_K * (p_only.getRollOutput() + dist) * dt;
+        }
+        checkNear(3.0f - w, -dist / RATE_ROLL_P, 1e-3f,
+                  "P alone settles short by exactly disturbance / P (rad/s)");
+
+        Rate with_i;
+        with_i.reset();
+        float w2 = 0.0f;
+        for (int i = 0; i < 4000; i++) {
+            with_i.setRateTarget(Vector3f(3.0f, 0, 0));
+            with_i.update(Vector3f(w2, 0, 0), dt);
+            w2 += PLANT_K * (with_i.getRollOutput() + dist) * dt;
+        }
+        checkNear(w2, 3.0f, 1e-3f, "the integrator removes it completely (rad/s)");
+        checkNear(with_i.getRollPID().getI(), -dist, 1e-3f,
+                  "and it has wound to exactly the disturbance it is cancelling");
+    }
+    {
+        // Derivative kick, which is the entire reason PID has two entry
+        // points and this loop uses the other one. A stick step is a step in
+        // the TARGET; differentiating the error would put a one-sample spike
+        // of 5 rad/s / dt straight through D and into the motors.
+        Rate r;
+        r.reset();
+        for (int i = 0; i < 200; i++) { r.setRateTarget(Vector3f()); r.update(Vector3f(), dt); }
+        r.setRateTarget(Vector3f(5.0f, 0, 0));
+        r.update(Vector3f(), dt);
+        checkNear(r.getRollPID().getD(), 0.0f, 1e-9f,
+                  "a slammed stick puts NOTHING through the D term");
+
+        // The same step in the measurement must produce D -- that is what it
+        // is for. Damping the aircraft, not the pilot.
+        Rate r2;
+        r2.reset();
+        for (int i = 0; i < 200; i++) { r2.setRateTarget(Vector3f()); r2.update(Vector3f(), dt); }
+        r2.update(Vector3f(1.0f, 0, 0), dt);
+        check(std::fabs(r2.getRollPID().getD()) > 0.01f,
+              "while the aircraft moving does, which is the damping");
+        check(r2.getRollPID().getD() < 0.0f, "and it opposes the motion");
+    }
+    {
+        // Yaw is PI: an axis made from motor torque reaction is too slow for a
+        // D term to do anything but feed it noise.
+        Rate r;
+        checkNear(r.getYawPID().getKd(), 0.0f, 1e-9f, "yaw has no D term");
+        check(r.getYawPID().getKi() > 0.0f, "but it does have an integrator");
+        check(r.getRollPID().getKd() > 0.0f, "roll and pitch have both");
+        check(r.getYawPID().getKi() < r.getRollPID().getKi(),
+              "and yaw integrates more slowly than roll, being the weaker axis");
+    }
+
+    // =====================================================================
+    section("Rate: anti-windup, which has to come from the mixer");
+    // =====================================================================
+    {
+        // Five seconds pinned. This loop cannot see that the mixer gave its
+        // yaw demand away -- it knows what it ASKED for, not what four motors
+        // managed -- so without the report the integrator winds to its clamp
+        // against an error it was never allowed to correct, and the aircraft
+        // snaps round when the saturation ends.
+        Rate pinned;
+        pinned.reset();
+        for (int i = 0; i < 2000; i++) {
+            pinned.setRateTarget(Vector3f(0, 0, 5.0f));
+            pinned.setMixerSaturation(false, true);
+            pinned.update(Vector3f(), dt);
+        }
+        checkNear(pinned.getYawPID().getI(), 0.0f, 1e-9f,
+                  "told the mixer could not deliver, yaw does not integrate at all");
+        check(pinned.getLimits().mixer_yaw,
+              "and the report is echoed back, so the wiring is visible");
+
+        Rate free_run;
+        free_run.reset();
+        for (int i = 0; i < 2000; i++) {
+            free_run.setRateTarget(Vector3f(0, 0, 5.0f));
+            free_run.setMixerSaturation(false, false);
+            free_run.update(Vector3f(), dt);
+        }
+        check(free_run.getYawPID().getI() > 0.05f,
+              "told it could, the same five seconds wind it up properly");
+        check(!free_run.getLimits().mixer_yaw, "with nothing reported");
+    }
+    {
+        // The integrator may SHRINK while pinned -- that is how it comes back
+        // off the stop -- it just may not grow.
+        Rate r;
+        r.reset();
+        for (int i = 0; i < 2000; i++) {      // wind it up honestly first
+            r.setRateTarget(Vector3f(0, 0, 5.0f));
+            r.setMixerSaturation(false, false);
+            r.update(Vector3f(), dt);
+        }
+        const float wound = r.getYawPID().getI();
+        check(wound > 0.05f, "wound up");
+        for (int i = 0; i < 2000; i++) {      // now pinned, with the error reversed
+            r.setRateTarget(Vector3f(0, 0, -5.0f));
+            r.setMixerSaturation(false, true);
+            r.update(Vector3f(), dt);
+        }
+        check(r.getYawPID().getI() < wound,
+              "pinned with the error reversed, it still unwinds");
+    }
+    {
+        // Our own clipping is the half this class CAN see, and it feeds the
+        // same mechanism. No mixer report at all here.
+        Rate r;
+        r.reset();
+        r.setRateTarget(Vector3f(50.0f, 0, 0));
+        r.update(Vector3f(), dt);
+        const float after_one = r.getRollPID().getI();
+        for (int i = 0; i < 400; i++) {
+            r.setRateTarget(Vector3f(50.0f, 0, 0));
+            r.update(Vector3f(), dt);
+        }
+        checkNear(r.getRollOutput(), RATE_OUTPUT_MAX, 1e-6f,
+                  "an impossible demand is held at the output range");
+        check(r.getLimits().roll, "reported");
+
+        // Saturation can only ever be known one cycle late -- the integrator
+        // is advanced by an error whose output has not been clamped yet, and
+        // the clamp is what says it was impossible. So it grows for exactly
+        // one cycle and then stops, and the test is that it STOPS: a loop
+        // that kept creeping here would reach its clamp over a long
+        // saturation and hand the aircraft a wound-up integrator when the
+        // stop cleared.
+        checkNear(after_one, 50.0f * RATE_ROLL_I * dt, 1e-6f,
+                  "one cycle of integration happens before the clip is visible");
+        checkNear(r.getRollPID().getI(), after_one, 1e-9f,
+                  "and then it stops dead -- 400 more cycles add nothing");
+        check(after_one < RATE_IMAX * 0.05f,
+              "which is a twentieth of the clamp, on an error no loop above would ever ask for");
+    }
+    {
+        // The clamp is the backstop for everything the flags miss.
+        Rate r;
+        r.reset();
+        for (int i = 0; i < 20000; i++) {     // 50 s of a hopeless demand
+            r.setRateTarget(Vector3f(0, 0, 50.0f));
+            r.setMixerSaturation(false, false);   // lying: nothing is reported
+            r.update(Vector3f(), dt);
+        }
+        check(r.getYawPID().getI() <= RATE_IMAX + 1e-6f,
+              "with every flag suppressed the integrator still cannot pass iMax");
+    }
+
+    // =====================================================================
+    section("Rate: filtering, because the gyro is bolted to four propellers");
+    // =====================================================================
+    {
+        // Propeller noise must not reach the motors. 100 Hz on the gyro,
+        // through a 20 Hz pole, with the loop asked to hold still.
+        Rate noisy;
+        noisy.reset();
+        Rate clean;
+        clean.reset();
+        clean.setGyroCutoffHz(0.0f);          // no filter, for comparison
+        float worst_filtered = 0.0f, worst_raw = 0.0f;
+        for (int i = 0; i < 4000; i++) {
+            const float n = 0.3f * std::sin(2.0f * 3.14159265f * 100.0f * i * dt);
+            noisy.setRateTarget(Vector3f());
+            clean.setRateTarget(Vector3f());
+            noisy.update(Vector3f(n, 0, 0), dt);
+            clean.update(Vector3f(n, 0, 0), dt);
+            if (i > 800) {
+                if (std::fabs(noisy.getRollOutput()) > worst_filtered)
+                    worst_filtered = std::fabs(noisy.getRollOutput());
+                if (std::fabs(clean.getRollOutput()) > worst_raw)
+                    worst_raw = std::fabs(clean.getRollOutput());
+            }
+        }
+        check(worst_filtered < worst_raw * 0.2f,
+              "the gyro pole keeps most of 100 Hz propeller noise out of the motors");
+        check(worst_filtered < 0.05f, "leaving the output nearly still");
+    }
+    {
+        // The gyro filter must not eat the signal it is meant to pass. A
+        // steady rate has to arrive in full, or the loop is flying a number
+        // the aircraft is not doing.
+        Rate r;
+        r.reset();
+        for (int i = 0; i < 2000; i++) { r.setRateTarget(Vector3f()); r.update(Vector3f(2.0f, 0, 0), dt); }
+        checkNear(r.getFilteredGyro().x, 2.0f, 1e-3f, "a steady rate passes through intact");
+    }
+    {
+        // Seeded, not slid toward from zero: filtering up from zero on the
+        // first sample of an arm would read as a full-scale step and put a
+        // large false derivative through D.
+        Rate r;
+        r.reset();
+        r.setRateTarget(Vector3f());
+        r.update(Vector3f(3.0f, 0, 0), dt);
+        checkNear(r.getFilteredGyro().x, 3.0f, 1e-6f,
+                  "the first sample after reset seeds the filter");
+        checkNear(r.getRollPID().getD(), 0.0f, 1e-9f, "so there is no false derivative");
+    }
+
+    // =====================================================================
+    section("Rate: the oscillation reading");
+    // =====================================================================
+    {
+        // The signature failure of this loop, and the one thing about it a
+        // number can catch before an airframe does.
+        Rate smooth;
+        smooth.reset();
+        float w = 0.0f;
+        float mid = 0.0f;
+        for (int i = 0; i < 4000; i++) {
+            smooth.setRateTarget(Vector3f(1.0f, 0, 0));
+            smooth.update(Vector3f(w, 0, 0), dt);
+            w += PLANT_K * smooth.getRollOutput() * dt;
+            if (i == 200) mid = smooth.getOscillation().x;
+        }
+        Rate ringing;
+        ringing.reset();
+        for (int i = 0; i < 4000; i++) {
+            ringing.setRateTarget(Vector3f());
+            ringing.update(Vector3f(0.5f * std::sin(2.0f*3.14159265f*25.0f*i*dt), 0, 0), dt);
+        }
+        check(mid < 0.2f, "flying a step reads small");
+        checkNear(smooth.getOscillation().x, 0.0f, 1e-3f, "and settled, it reads nothing");
+        check(ringing.getOscillation().x > 20.0f * mid,
+              "an airframe ringing at 25 Hz reads orders of magnitude higher");
+        checkNear(ringing.getOscillation().z, 0.0f, 1e-6f,
+              "on the axis that is ringing, and only that one");
+    }
+
+    // =====================================================================
+    section("Rate: what it does when it is not flying, or is lied to");
+    // =====================================================================
+    {
+        Rate r;
+        check(!r.isActive(), "a fresh Rate is inactive");
+        checkNear(r.getOutput().length(), 0.0f, 1e-9f, "and demands no torque");
+        r.setRateTarget(Vector3f(5.0f, 0, 0));
+        r.update(Vector3f(), dt);
+        checkNear(r.getOutput().length(), 0.0f, 1e-9f,
+                  "update() before reset() does nothing -- the motors get nothing by accident");
+    }
+    {
+        // The most dangerous freeze in the stack: the motors keep doing
+        // something plausible and nothing in the output says the gyro died.
+        Rate r;
+        r.reset();
+        r.setRateTarget(Vector3f(1.0f, 0, 0));
+        r.update(Vector3f(), dt);
+        const Vector3f last = r.getOutput();
+        check(r.getRejectedCount() == 0, "a healthy loop rejects nothing");
+
+        const float nan = std::nanf("");
+        for (int i = 0; i < 500; i++) r.update(Vector3f(nan, nan, nan), dt);
+        checkNear((r.getOutput() - last).length(), 0.0f, 1e-9f,
+                  "a dead gyro freezes the demand rather than poisoning it");
+        check(r.getRejectedCount() == 500, "... and every refused sample is counted");
+        r.update(Vector3f(), 0.0f);
+        check(r.getRejectedCount() == 501, "a zero dt is refused too");
+        r.update(Vector3f(), -dt);
+        check(r.getRejectedCount() == 502, "and so is a negative one");
+
+        r.reset();
+        check(r.getRejectedCount() == 0,
+              "reset() clears it -- a fault from a previous arm is not current");
+        checkNear(r.getOutput().length(), 0.0f, 1e-9f, "and the demand goes with it");
+    }
+    {
+        // Ground idle: armed, the loop running, the motors unable to act. The
+        // integrators must not accumulate against an aircraft that physically
+        // cannot rotate, or the wind-up becomes torque the instant the motors
+        // get authority. That is a flip on takeoff.
+        Rate r;
+        r.reset();
+        for (int i = 0; i < 2000; i++) {
+            r.setRateTarget(Vector3f(0.5f, 0.5f, 0.5f));
+            r.update(Vector3f(), dt);         // held on the ground: no rotation
+            r.resetIntegrators();
+        }
+        checkNear(r.getRollPID().getI(), 0.0f, 1e-9f, "roll cannot wind up on the ground");
+        checkNear(r.getPitchPID().getI(), 0.0f, 1e-9f, "nor pitch");
+        checkNear(r.getYawPID().getI(), 0.0f, 1e-9f, "nor yaw");
+        check(std::fabs(r.getRollOutput()) > 0.0f,
+              "while P and D keep working, so the aircraft is still stabilised");
+    }
+    {
+        // reset() must clear the mixer's report as well. It describes a cycle
+        // from before this loop was engaged, and carrying it in would freeze
+        // the integrators on the first cycle of the new mode.
+        Rate r;
+        r.reset();
+        r.setMixerSaturation(true, true);
+        r.setRateTarget(Vector3f(1.0f, 0, 0));
+        r.update(Vector3f(), dt);
+        check(r.getLimits().mixer_roll_pitch, "saturation is held until overwritten");
+        r.reset();
+        r.setRateTarget(Vector3f(1.0f, 0, 0));
+        for (int i = 0; i < 400; i++) r.update(Vector3f(), dt);
+        check(!r.getLimits().mixer_roll_pitch, "and reset() clears it");
+        check(r.getRollPID().getI() > 0.0f, "so the new mode's integrator is free to work");
+    }
+    {
+        Rate r;
+        r.setRollGains(-1.0f, 1.0f, 1.0f);
+        checkNear(r.getRollPID().getKp(), RATE_ROLL_P, 1e-9f, "a negative gain is refused");
+        r.setRollGains(std::nanf(""), 1.0f, 1.0f);
+        checkNear(r.getRollPID().getKp(), RATE_ROLL_P, 1e-9f, "and so is a NaN one");
+        r.setOutputLimit(0.0f);
+        checkNear(r.getOutputLimit(), RATE_OUTPUT_MAX, 1e-9f,
+                  "a zero output limit is refused -- it would lose the saturation report");
+        r.setRollGains(0.2f, 0.1f, 0.001f);
+        checkNear(r.getRollPID().getKp(), 0.2f, 1e-9f, "a sane one is taken");
+        r.setFeedForward(0.05f, 0.05f, 0.0f);
+        checkNear(r.getRollPID().getKff(), 0.05f, 1e-9f, "feed-forward is available");
+        checkNear(r.getRollPID().getKp(), 0.2f, 1e-9f, "and setting it leaves the gains alone");
+    }
+
+    // =====================================================================
+    section("The cascade, end to end");
+    // =====================================================================
+    {
+        // Attitude and Rate together against a rigid body, with the inner
+        // loop no longer perfect: the aircraft only turns as fast as the
+        // torque this class asks for can turn it. This is the pair that has
+        // to work for anything above them to mean anything.
+        Attitude att;
+        Rate rate;
+        Quaternionf q = quat(0, 0, 0);
+        Vector3f w;                            // body rate, rad/s
+        att.reset(q);
+        rate.reset();
+
+        const Quaternionf target = quat(15.0f*D2R, -10.0f*D2R, 30.0f*D2R);
+        att.setAttitudeTarget(target);
+        for (int i = 0; i < 4000; i++) {       // 10 s
+            att.update(q, dt);
+            rate.setRateTarget(att.getRateTarget());
+            rate.update(w, dt);
+            const Vector3f torque = rate.getOutput();
+            w = w + torque * (PLANT_K * dt);   // rigid body: torque -> acceleration
+            q = spin(q, w, dt);
+        }
+        checkNear(angleBetween(q, target) * R2D, 0.0f, 0.5f,
+                  "the two inner loops together fly the aircraft to the target (deg)");
+        checkNear(w.length(), 0.0f, 0.05f, "and stop there");
+        check(rate.getRejectedCount() == 0, "with nothing refused on the way");
+    }
+    {
+        // All four loops, against a 6-DOF rigid body. Every other check in
+        // this file exercises one class; this is the only one that can catch a
+        // sign convention that two classes disagree about, or a handoff where
+        // the units are right and the meaning is not.
+        //
+        // The plant is honest about the one thing that matters here: the
+        // aircraft has a single thrust axis and cannot push sideways, so the
+        // only way it reaches a position 10 m north is if the whole cascade
+        // agrees about which way to lean.
+        Position pos;
+        Velocity vel;
+        Attitude att;
+        Rate rate;
+
+        Vector3f p, v, w;                    // NED position, NED velocity, body rate
+        Quaternionf q;                       // level, facing north
+        pos.reset(p); vel.reset(v); att.reset(q); rate.reset();
+        pos.setDesiredPosition(Vector3f(10.0f, 5.0f, -3.0f));   // 10 N, 5 E, 3 UP
+
+        float worst_tilt = 0.0f, worst_speed = 0.0f;
+        for (int i = 0; i < 8000; i++) {     // 20 s
+            // --- the cascade, outermost first ---
+            pos.update(p, dt);
+            vel.setVelocityTarget(pos.getVelocityTarget());
+            vel.update(v, Attitude::headingFromAttitude(q), dt);
+            att.setThrustVectorHeading(vel.getThrustVector(), 0.0f);
+            att.update(q, dt);
+            rate.setRateTarget(att.getRateTarget());
+            rate.update(w, dt);
+
+            // --- plant ---
+            w = w + rate.getOutput() * (PLANT_K * dt);
+            q = spin(q, w, dt);
+            // Thrust acts along body "up", scaled so the hover throttle is 1 g.
+            const Vector3f up = q.rotate(Vector3f(0, 0, -1));
+            const Vector3f accel = up * ((vel.getThrottle() / vel.getHoverThrottle()) * G)
+                                 + Vector3f(0, 0, G);
+            v = v + accel * dt;
+            p = p + v * dt;
+
+            const float tilt = std::acos(clampf(-up.z, -1.0f, 1.0f));
+            if (tilt > worst_tilt) worst_tilt = tilt;
+            if (v.length() > worst_speed) worst_speed = v.length();
+        }
+
+        checkNear((p - Vector3f(10.0f, 5.0f, -3.0f)).length(), 0.0f, 0.05f,
+                  "the whole cascade flies the aircraft to a position 11 m away (m)");
+        checkNear(v.length(), 0.0f, 0.02f, "and stops there (m/s)");
+        checkNear(vel.getThrottle(), VELOCITY_HOVER_THROTTLE, 2e-3f,
+                  "holding station at exactly the hover throttle");
+        checkNear(Attitude::headingFromAttitude(q) * R2D, 0.0f, 0.2f,
+                  "on the heading it was given, having leaned in two axes to get there (deg)");
+
+        // The limits above were not bypassed on the way.
+        check(worst_tilt <= VELOCITY_MAX_LEAN_ANGLE + 1e-3f,
+              "never leaning past the lean limit en route");
+        check(worst_speed <= POSITION_SPEED_NE * 1.1f,
+              "and never flying faster than the position loop allows");
+
+        check(att.getRejectedCount() == 0 && rate.getRejectedCount() == 0,
+              "with no loop refusing a single sample");
     }
 
     return testReport("Controllers");
