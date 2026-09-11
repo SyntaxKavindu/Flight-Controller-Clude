@@ -69,14 +69,18 @@ integ: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_integ test_integration.cpp $(STACK_SRC)
 	@$(BUILD)/t_integ
 
-# The control cascade's implemented half. Links NO stub: PID, Position and
-# Velocity take dt as a parameter and touch no peripheral, so if this ever
-# starts needing stub/ a board dependency has crept into the control law.
+# The whole control cascade, now that every loop in it exists. Links NO stub:
+# each of these takes dt as a parameter and touches no peripheral, so if this
+# ever starts needing stub/ a board dependency has crept into the control law.
+# Rate in particular must stay clear of Motors, which owns the ESCs -- it takes
+# the mixer's saturation as two bools rather than including its header.
 ctrl: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_ctrl test_controllers.cpp \
 		$(ROOT)/Drone/Controllers/PID/PID.cpp \
 		$(ROOT)/Drone/Controllers/Position/Position.cpp \
-		$(ROOT)/Drone/Controllers/Velocity/Velocity.cpp
+		$(ROOT)/Drone/Controllers/Velocity/Velocity.cpp \
+		$(ROOT)/Drone/Controllers/Attitude/Attitude.cpp \
+		$(ROOT)/Drone/Controllers/Rate/Rate.cpp
 	@$(BUILD)/t_ctrl
 
 # The status panel. Needs the HAL stub for GPIO and the clock, but nothing else
