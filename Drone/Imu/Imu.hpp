@@ -44,9 +44,22 @@ public:
 	// False until the first successful read.
 	bool hasData(void) const { return _hasData; }
 
+	// The accelerometer sample as the SENSOR reported it: axis-remapped into the
+	// body frame, but with no bias/scale correction and no board rotation.
+	//
+	// This is the exact input the accelerometer calibration fits, which is what
+	// makes it comparable with getData() -- rotate the airframe through every
+	// orientation and a good calibration shows the raw cloud as an offset,
+	// squashed ellipsoid and the corrected one as a sphere of radius g. Nothing
+	// in flight should use it.
+	Vector3f getRawAccel(void) const { return _raw_accel; }
+
 private:
 	ICM42688P _sensor;
 	IMU_Data _data;
+	// Kept only for getRawAccel(). update() corrects in place, so the
+	// pre-correction value is otherwise gone before anyone can ask.
+	Vector3f _raw_accel;
 
 	Calibrator *_calibrator;
 	IMU_StatusTypeDef _status;

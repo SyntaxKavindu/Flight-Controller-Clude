@@ -53,7 +53,8 @@ Vector3f Imu::remapGyro(const Vector3f &v) { return remapBoardAxes(v); }
 
 Imu::Imu() :
 		_sensor { &hspi1, SPI1_CS_GPIO_Port, SPI1_CS_Pin }, _data { },
-		_calibrator { nullptr }, _status { IMU_StatusTypeDef::ERROR },
+		_raw_accel { }, _calibrator { nullptr },
+		_status { IMU_StatusTypeDef::ERROR },
 		_hasData { false } {
 }
 
@@ -90,6 +91,10 @@ void Imu::update(void) {
 	// Chip axes -> body frame, before anything else looks at the numbers.
 	sample.accel = remapAccel(sample.accel);
 	sample.gyro = remapGyro(sample.gyro);
+
+	// Captured BEFORE any correction, which is the whole point of it -- see
+	// getRawAccel().
+	_raw_accel = sample.accel;
 
 	if (_calibrator != nullptr) {
 		// While a procedure is running this is the only place raw samples come
