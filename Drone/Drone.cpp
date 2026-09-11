@@ -751,7 +751,8 @@ void Drone::reportDiagnostics(void) {
 	// CALIBRATOR_ACCEL_FEED_HZ means setAccelFeedRate() was never called, and
 	// every sample-count gate in AccelerometerCalibrator and LevelCalibrator is
 	// then running at a fraction of its documented time -- which shows up as a
-	// tumble that reports STALLED partway through a good run.
+	// six-position run that reports STALLED while the operator is still
+	// settling the airframe after READY.
 	// What the panel is being TOLD, which is the half worth reporting: it says
 	// whether the states reaching the indicator are the ones expected, so a
 	// wrong-looking LED can be blamed on the wiring or on the state feeding it.

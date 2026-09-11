@@ -101,7 +101,7 @@ public:
     CompassCalibrator();
 
     // sample_buffer / capacity: where the samples are collected. Caller-owned,
-    // must outlive the procedure. See AccelerometerCalibrator::beginTumble()
+    // must outlive the procedure. See CALIBRATOR_SAMPLE_ARENA
     // for why this is a parameter and not a member array.
     //
     // Returns false -- and does NOT start -- if the buffer is null or smaller
