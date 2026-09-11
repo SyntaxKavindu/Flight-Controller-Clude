@@ -29,7 +29,7 @@ static Vector3f distort(const Vector3f &t, const Vector3f &scale,
                     scale.z * t.z + cross * t.x + bias.z);
 }
 
-// Points spread over a sphere, so a tumble sees real coverage.
+// Points spread over a sphere, so a compass sweep sees real coverage.
 static Vector3f spherePoint(int i, int n, float radius)
 {
     const float k  = (float)i + 0.5f;
@@ -101,43 +101,62 @@ int main()
         checkNear(c.getProgressPercent(), 0.0f, 0.01f, "the disturbed average is discarded");
     }
 
-    section("Accelerometer: tumble (caller-supplied buffer)");
+    section("Accelerometer: the fit is diagonal, and therefore rotation-free");
     {
-        Vector3f buf[ACCEL_CAL_TUMBLE_MAX_SAMPLES];
+        // The correction must never contain a rotation. That is what keeps it
+        // from fighting the board rotation LevelCalibrator stores -- two
+        // rotations measured against different references would each be
+        // correcting the other's reference.
         AccelerometerCalibrator c;
-        check(!c.beginTumble(G, 0.2f, nullptr, 300), "a null buffer is refused");
-        check(!c.beginTumble(G, 0.2f, buf, 10), "a buffer too small to finish is refused");
-        check(c.beginTumble(G, 0.2f, buf, ACCEL_CAL_TUMBLE_MAX_SAMPLES), "a valid buffer starts");
-
         const Vector3f scale(1.05f, 0.96f, 1.01f), bias(0.25f, -0.30f, 0.18f);
-        const int N = 400;
-        for (int i = 0; i < N && !c.isReadyToCalibrate(); i++) {
-            const Vector3f t = spherePoint(i % N, N, G);
-            const Vector3f raw = distort(t, scale, bias, 0.02f);
-            // Hold each orientation long enough to pass the stillness window.
-            for (int h = 0; h < 15 && !c.isReadyToCalibrate(); h++) c.addSample(raw);
+        static const Vector3f faces[6] = {
+            {G,0,0}, {-G,0,0}, {0,G,0}, {0,-G,0}, {0,0,G}, {0,0,-G}
+        };
+        c.beginSixPosition(0.5f);
+        for (int p = 0; p < 6; p++) {
+            c.startPosition((AccelPosition)p);
+            for (int i = 0; i < ACCEL_CAL_SAMPLES_PER_POSITION; i++) {
+                c.addSample(distort(faces[p], scale, bias, 0.0f));
+            }
         }
-        check(c.isReadyToCalibrate(), "tumble reaches coverage");
-        check(c.calibrate() == AccelCalStatus::SUCCESS, "ellipsoid fit succeeds");
-        checkNear(c.getBias().x, bias.x, 0.05f, "tumble recovers X bias");
-        checkNear(c.getBias().z, bias.z, 0.05f, "tumble recovers Z bias");
+        check(c.calibrate() == AccelCalStatus::SUCCESS, "the six-position fit succeeds");
+
+        const Matrix3f m = c.getMatrix();
+        bool off_diagonal_clear = true;
+        for (int r = 0; r < 3; r++) {
+            for (int col = 0; col < 3; col++) {
+                if (r != col && m.m[r][col] != 0.0f) off_diagonal_clear = false;
+            }
+        }
+        check(off_diagonal_clear, "every off-diagonal term is exactly zero");
+        // The faces are +/-G, so the sensitivity recovered is scale*G and the
+        // matrix normalises to a UNIT sphere -- that is the engine's output
+        // convention, and Calibrator::correctAcclData() multiplies g back in.
+        checkNear(m.m[0][0], 1.0f / (scale.x * G), 1e-5f, "and the diagonal is 1/(scale*g)");
+        checkNear(m.m[1][1], 1.0f / (scale.y * G), 1e-5f, "... on Y");
+        checkNear(m.m[2][2], 1.0f / (scale.z * G), 1e-5f, "... and Z");
+
+        checkNear(c.getBias().x, bias.x, 1e-4f, "the bias is recovered on X");
+        checkNear(c.getBias().y, bias.y, 1e-4f, "... Y");
+        checkNear(c.getBias().z, bias.z, 1e-4f, "... and Z");
+
+        // And the correction really does land every face on the unit sphere.
         float worst = 0.0f;
-        for (int i = 0; i < 200; i++) {
-            const Vector3f t = spherePoint(i, 200, G);
-            const Vector3f got = c.correct(distort(t, scale, bias, 0.02f));
+        for (int p = 0; p < 6; p++) {
+            const Vector3f got = c.correct(distort(faces[p], scale, bias, 0.0f));
             worst = std::fmax(worst, std::fabs(got.length() - 1.0f));
         }
-        checkNear(worst, 0.0f, 0.02f, "corrected tumble readings land on the unit sphere");
+        checkNear(worst, 0.0f, 1e-4f, "and every face lands on the unit sphere");
     }
     {
-        // Structureless input must be rejected, not fitted.
-        Vector3f buf[ACCEL_CAL_TUMBLE_MAX_SAMPLES];
+        // getMatrix() must be identity until the fit has succeeded, or an
+        // unfinished calibration would scale everything it touched.
         AccelerometerCalibrator c;
-        c.beginTumble(G, 5.0f, buf, ACCEL_CAL_TUMBLE_MAX_SAMPLES);
-        for (int i = 0; i < 6000 && !c.isReadyToCalibrate(); i++)
-            c.addSample(Vector3f(rnd()*G, rnd()*G, rnd()*G));
-        const AccelCalStatus st = c.calibrate();
-        check(st != AccelCalStatus::SUCCESS, "noise with no ellipsoidal structure is rejected");
+        const Matrix3f m = c.getMatrix();
+        check(m.m[0][0] == 1.0f && m.m[1][1] == 1.0f && m.m[2][2] == 1.0f,
+              "an unfinished fit reports identity, not garbage");
+        check(c.calibrate() == AccelCalStatus::FAILED_NOT_ENOUGH_SAMPLES,
+              "and calibrating with no positions captured is refused");
     }
 
     section("Compass (caller-supplied buffer)");
@@ -151,7 +170,7 @@ int main()
         // Hard iron LARGER than the field itself -- the case that collapses a
         // fit binned about the origin.
         const Vector3f scale(1.10f, 0.92f, 1.03f), hard(0.75f, -0.60f, 0.40f);
-        // Interleaved order: a real tumble revisits both hemispheres throughout,
+        // Interleaved order: a real sweep revisits both hemispheres throughout,
         // so any prefix of the sweep is spread over the sphere. (Feeding the
         // spiral in index order instead walks pole to pole, and stopping early
         // on that IS a one-sided sweep -- correctly rejected, see below.)

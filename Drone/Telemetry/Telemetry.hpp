@@ -29,7 +29,6 @@
  *         CALIMU,LEVEL     ... and level the board straight afterwards, with
  *                          no second command: the sequence ends on Z_DOWN,
  *                          which is already the levelling orientation
- *         CALIMU,TUMBLE    tumble (ellipsoid) accelerometer calibration
  *         CALMAG           magnetometer calibration
  *         CALLEVEL         board levelling; needs a finished CALIMU behind it
  *         CALLEVEL,<deg>   ... with a known mounting yaw, degrees

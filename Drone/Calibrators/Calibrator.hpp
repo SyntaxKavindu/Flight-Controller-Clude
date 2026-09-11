@@ -29,11 +29,10 @@ enum class Calibrator_StatusTypeDef{
 // as 500 here would rescale every corrected reading by ~1000x.
 #define CALIBRATOR_COMPASS_NOMINAL_GAUSS      0.5f
 
-// Six-position motion gate and tumble stillness gate, in m/s^2 -- the units
-// ICM42688P::readData() / IMU_Data::accel are in. A few times the sensor's
-// at-rest noise floor; tune to your airframe.
+// Six-position motion gate, in m/s^2 -- the units ICM42688P::readData() /
+// IMU_Data::accel are in. A few times the sensor's at-rest noise floor; tune to
+// your airframe.
 #define CALIBRATOR_ACCEL_MOTION_THRESHOLD     0.5f
-#define CALIBRATOR_ACCEL_STILLNESS_THRESHOLD  0.2f
 
 // Send one progress line every N samples. calibrate*() is called once per
 // control loop, so reporting every sample would swamp the serial link.
@@ -41,21 +40,16 @@ enum class Calibrator_StatusTypeDef{
 
 // Rate at which the accelerometer procedures WANT to be fed, in Hz.
 //
-// Every rate-sensitive constant in AccelerometerCalibrator -- the stillness
-// window, the samples-per-position count, both stall limits -- was chosen and
-// characterised against a 200 Hz feed, and its header states the resulting
-// times in seconds on that basis. Nothing in that class measures time, so
-// feeding it faster silently rescales all four:
+// The rate-sensitive constants in AccelerometerCalibrator and LevelCalibrator
+// -- the samples-per-position count, the stall limits, LEVEL_CAL_SAMPLES --
+// were chosen and characterised against a 200 Hz feed, and their headers state
+// the resulting times in seconds on that basis. Nothing in either class
+// measures time, so feeding them faster silently rescales all of it:
 //
 //                      at 200 Hz (intended)   at 1 kHz (this fast loop)
-//   stillness window          60 ms             12 ms  <- admits motion
 //   samples/position         500 ms            100 ms  <- less averaging
 //   six-position stall         50 s              10 s
-//   tumble stall              200 s              41 s  <- aborts a good run
-//
-// The last one is not theoretical: the longest no-progress gap measured in a
-// SUCCESSFUL tumble was 10151 samples (see ACCEL_CAL_TUMBLE_STALL_LIMIT), and
-// that same operator pause at 1 kHz is ~50000 samples -- past the 40000 limit.
+//   LEVEL_CAL_SAMPLES          1.0 s             0.2 s
 //
 // So the feed is decimated back to this rate rather than the constants being
 // rescaled. Decimation, not averaging: dropping N-1 of every N samples leaves
@@ -67,31 +61,25 @@ enum class Calibrator_StatusTypeDef{
 // The compass path needs none of this: it is fed from the 50 Hz mid loop.
 #define CALIBRATOR_ACCEL_FEED_HZ              200u
 
-// ONE sample buffer, shared by the accelerometer tumble and the compass sweep.
+// The compass sweep's sample buffer.
 //
-// Both procedures collect into a caller-supplied buffer (see
-// AccelerometerCalibrator::beginTumble and CompassCalibrator::begin) and both
-// want 300 Vector3f, about 3.6 kB each. Giving each its own array put 7.2 kB
-// permanently in .bss to serve two procedures that run for a few seconds on the
-// ground, never in flight, and NEVER AT THE SAME TIME -- beginProcedure()
-// refuses to start one while another is running, which is what makes sharing
-// provably safe rather than merely probable.
+// CompassCalibrator::begin() takes the storage from its caller rather than
+// holding its own array, so that the ~3.6 kB is the integrator's to place --
+// see the note there. This is where this project places it.
 //
-// If you port this to a part where even 3.6 kB is too much: the buffer is a
-// caller parameter precisely so it can live somewhere else, and the six-
-// position accelerometer procedure needs no buffer at all.
-#define CALIBRATOR_SAMPLE_ARENA \
-	((ACCEL_CAL_TUMBLE_MAX_SAMPLES > COMPASS_CAL_MAX_SAMPLES) \
-			? ACCEL_CAL_TUMBLE_MAX_SAMPLES : COMPASS_CAL_MAX_SAMPLES)
+// It used to be shared with the accelerometer tumble, which wanted a buffer of
+// the same size and provably never ran at the same time. With tumble gone the
+// compass is the only claimant, so the sharing argument goes with it.
+#define CALIBRATOR_SAMPLE_ARENA  COMPASS_CAL_MAX_SAMPLES
 
 // On-EEPROM correction record. Both sensors persist the same shape, because
 // every procedure this class runs reduces to one affine correction:
 //
 //     corrected = matrix * (raw - offset)
 //
-// For the accelerometer that yields a unit-g vector (six-position uses
-// matrix = diag(1/scale), tumble uses matrix = tumble_matrix / nominal_g); for
-// the compass it yields a vector of the nominal field magnitude.
+// For the accelerometer that yields a unit-g vector, with matrix =
+// diag(1/scale); for the compass it yields a vector of the nominal field
+// magnitude, and the matrix carries the soft-iron terms too.
 //
 // Layout is fixed and read back by the same MCU that wrote it, so native float
 // representation and byte order are fine. Bump CALIBRATION_RECORD_VERSION if
@@ -104,42 +92,19 @@ struct CalibrationRecord {
 	uint16_t magic;
 	uint8_t  version;
 
-	// Worst-case cross-axis misalignment the six-position fit LEFT BEHIND,
-	// in tenths of a degree, PLUS ONE. Zero means "not recorded".
-	//
-	// The +1 is what makes this backward compatible. This byte was `reserved`
-	// and written as zero, so every record already on a device decodes as "not
-	// recorded" rather than as a perfect 0.00 deg -- which is the one reading
-	// that would be actively misleading. No version bump, and an existing
-	// calibration keeps working.
-	//
-	// One byte is enough: the useful range is 0..25.4 deg in 0.1 deg steps, and
-	// anything past a couple of degrees means "use tumble" long before the
-	// resolution matters. It sits ahead of `crc` so it is covered by it.
-	//
-	// Absent for a tumble fit, which removes cross-axis error rather than
-	// leaving it, and for the compass and levelling records, where the quantity
-	// has no meaning.
-	uint8_t  misalign_deci;
+	// Padding, written as zero. It briefly held a cross-axis misalignment
+	// figure; that was removed with the tumble procedure it existed to argue
+	// for. The BYTE stays so the record keeps its layout and its size, which is
+	// what lets every calibration already stored on a device load unchanged --
+	// dropping it would move `crc`, invalidate every stored record, and force a
+	// re-calibration for no gain. It is covered by the CRC either way.
+	uint8_t  reserved;
 
 	float    offset[3];
 	float    matrix[9];
 	uint16_t crc;      // CRC-16/CCITT-FALSE over every byte before this field
 	uint16_t pad;
 };
-
-// Encode/decode for the field above. -1 means "not recorded" on both sides.
-inline uint8_t calibrationEncodeMisalign(float deg) {
-	if (!(deg >= 0.0f)) {          // also catches NaN
-		return 0;
-	}
-	const long v = (long) (deg * 10.0f + 0.5f) + 1;
-	return (v > 255) ? (uint8_t) 255 : (uint8_t) v;
-}
-
-inline float calibrationDecodeMisalign(uint8_t stored) {
-	return (stored == 0) ? -1.0f : (float) (stored - 1) * 0.1f;
-}
 
 static_assert(sizeof(CalibrationRecord) == 56,
 		"CalibrationRecord must stay 56 bytes to fit an EEPROM slot");
@@ -180,17 +145,12 @@ public:
 	// with no further operator input. The sequence ends on Z_DOWN -- +Z, the
 	// body DOWN axis, pointing down, i.e. the airframe sitting upright reading
 	// (0,0,-g) -- which is exactly the orientation levelling wants, and the
-	// airframe is already still in it. Six-position only: a tumble finishes in
-	// whatever orientation the operator stopped in, so it is never chained.
+	// airframe is already still in it.
 	//
 	// This makes the surface the six-position run finished on the reference
 	// that DEFINES level for the airframe. That is the whole reason it is a
 	// parameter and not the default -- see the note at startLevelCalibration().
 	void startAccelerometerCalibration(bool chain_level = false);
-	// Alternative single-shot accelerometer procedure: tumble the airframe
-	// through as many orientations as possible, pausing briefly in each.
-	// Mutually exclusive with the six-position sequence above.
-	void startAccelerometerTumbleCalibration();
 	void startCompassCalibration();
 
 	// Board levelling: rest the airframe on a surface known to be level and
@@ -322,14 +282,10 @@ public:
 	// Also useful to a ground-station or config tool that needs to build or
 	// validate a record without an MCU.
 	static uint16_t recordCrc(const CalibrationRecord &rec);
-	// misalign_deg: -1 when the quantity does not apply, which is every record
-	// except a six-position accelerometer fit. unpackRecord() hands back -1 for
-	// a record that predates the field, so a caller cannot tell "not recorded"
-	// from "recorded as zero" by accident.
 	static void packRecord(const Vector3f &offset, const Matrix3f &matrix,
-			CalibrationRecord &out, float misalign_deg = -1.0f);
+			CalibrationRecord &out);
 	static bool unpackRecord(const CalibrationRecord &rec, Vector3f &offset,
-			Matrix3f &matrix, float *misalign_deg = nullptr);
+			Matrix3f &matrix);
 
 private:
 	AccelerometerCalibrator _accelerometerCalibrator;
@@ -375,11 +331,6 @@ private:
 	// calibrator objects on every sample: a calibration restored from EEPROM
 	// has no estimator state behind it, so the facade has to own the gains for
 	// the boot path and the just-calibrated path to behave identically.
-	// Cross-axis misalignment the stored accelerometer fit left behind, in
-	// degrees; -1 when not recorded. Persisted, so CALDUMP can report it after
-	// a reboot instead of it existing only in the one line CALIMU printed.
-	float _accelMisalignDeg;
-
 	Vector3f _accelOffset;
 	Matrix3f    _accelMatrix;
 	Vector3f _compassOffset;
@@ -428,13 +379,10 @@ private:
 	Calibrator_StatusTypeDef saveCompassCalibrationData();
 	Calibrator_StatusTypeDef saveLevelCalibrationData();
 
-
-
 	Calibrator_StatusTypeDef loadRecord(EEPROMLocation location,
-			Vector3f &offset, Matrix3f &matrix, float *misalign_deg = nullptr);
+			Vector3f &offset, Matrix3f &matrix);
 	Calibrator_StatusTypeDef saveRecord(EEPROMLocation location,
-			const Vector3f &offset, const Matrix3f &matrix,
-			float misalign_deg = -1.0f);
+			const Vector3f &offset, const Matrix3f &matrix);
 };
 
 // The one calibrator. Telemetry drives it; the sensor frontends feed and
