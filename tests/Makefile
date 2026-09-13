@@ -29,7 +29,7 @@ CAL_SRC   := $(ROOT)/Drone/Calibrators/AccelerometerCalibrator.cpp \
 # Drone.cpp is now part of the stack, not an extra: `drone` IS the globals, so
 # anything that touches a subsystem needs it. That is the cost of dropping
 # dependency injection, and it is why `integ` and `firmware` now link the same
-# set. `cal` below is unaffected -- those classes never name `drone`.
+# set. `cal` and `ctrl` below are unaffected -- those classes never name `drone`.
 STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
              $(ROOT)/Drone/Drone.cpp $(ROOT)/Drone/Imu/Imu.cpp \
              $(ROOT)/Drone/Indicator/Indicator.cpp \
@@ -48,8 +48,8 @@ STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
 # only thing that catches that class of rot.
 ALL_SRC := $(shell find $(ROOT)/Drone -name '*.cpp')
 
-.PHONY: all esekf cal integ indicator firmware compileall clean
-all: compileall esekf cal integ indicator firmware
+.PHONY: all esekf cal integ indicator ctrl firmware compileall clean
+all: compileall esekf cal integ indicator ctrl firmware
 	@echo "=========================================="
 	@echo " all suites passed"
 	@echo "=========================================="
@@ -68,6 +68,15 @@ cal: | $(BUILD)
 integ: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_integ test_integration.cpp $(STACK_SRC)
 	@$(BUILD)/t_integ
+
+# The attitude controller. Links NO stub: it takes dt as a parameter and
+# touches no peripheral, so if this ever starts needing stub/ a board
+# dependency has crept into the control law. It includes MathTypes.hpp rather
+# than common.hpp for the same reason -- common.hpp would drag the HAL in.
+ctrl: | $(BUILD)
+	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_ctrl test_controllers.cpp \
+		$(ROOT)/Drone/Controllers/Attitude/Attitude.cpp
+	@$(BUILD)/t_ctrl
 
 # The status panel. Needs the HAL stub for GPIO and the clock, but nothing else
 # from the flight stack -- the class talks to pins and HAL_GetTick() and that is
