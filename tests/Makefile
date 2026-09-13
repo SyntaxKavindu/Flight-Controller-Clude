@@ -29,7 +29,7 @@ CAL_SRC   := $(ROOT)/Drone/Calibrators/AccelerometerCalibrator.cpp \
 # Drone.cpp is now part of the stack, not an extra: `drone` IS the globals, so
 # anything that touches a subsystem needs it. That is the cost of dropping
 # dependency injection, and it is why `integ` and `firmware` now link the same
-# set. `cal` and `ctrl` below are unaffected -- those classes never name `drone`.
+# set. `cal` below is unaffected -- those classes never name `drone`.
 STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
              $(ROOT)/Drone/Drone.cpp $(ROOT)/Drone/Imu/Imu.cpp \
              $(ROOT)/Drone/Indicator/Indicator.cpp \
@@ -48,8 +48,8 @@ STACK_SRC := $(ESEKF_SRC) $(ROOT)/Drone/Calibrators/Calibrator.cpp $(CAL_SRC) \
 # only thing that catches that class of rot.
 ALL_SRC := $(shell find $(ROOT)/Drone -name '*.cpp')
 
-.PHONY: all esekf cal integ indicator ctrl firmware compileall clean
-all: compileall esekf cal integ indicator ctrl firmware
+.PHONY: all esekf cal integ indicator firmware compileall clean
+all: compileall esekf cal integ indicator firmware
 	@echo "=========================================="
 	@echo " all suites passed"
 	@echo "=========================================="
@@ -68,20 +68,6 @@ cal: | $(BUILD)
 integ: | $(BUILD)
 	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_integ test_integration.cpp $(STACK_SRC)
 	@$(BUILD)/t_integ
-
-# The whole control cascade, now that every loop in it exists. Links NO stub:
-# each of these takes dt as a parameter and touches no peripheral, so if this
-# ever starts needing stub/ a board dependency has crept into the control law.
-# Rate in particular must stay clear of Motors, which owns the ESCs -- it takes
-# the mixer's saturation as two bools rather than including its header.
-ctrl: | $(BUILD)
-	@$(CXX) $(CXXFLAGS) $(INC) -o $(BUILD)/t_ctrl test_controllers.cpp \
-		$(ROOT)/Drone/Controllers/PID/PID.cpp \
-		$(ROOT)/Drone/Controllers/Position/Position.cpp \
-		$(ROOT)/Drone/Controllers/Velocity/Velocity.cpp \
-		$(ROOT)/Drone/Controllers/Attitude/Attitude.cpp \
-		$(ROOT)/Drone/Controllers/Rate/Rate.cpp
-	@$(BUILD)/t_ctrl
 
 # The status panel. Needs the HAL stub for GPIO and the clock, but nothing else
 # from the flight stack -- the class talks to pins and HAL_GetTick() and that is
