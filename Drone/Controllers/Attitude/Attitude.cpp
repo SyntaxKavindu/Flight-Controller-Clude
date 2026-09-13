@@ -318,9 +318,25 @@ float Attitude::wrapPi(float rad)
 {
 	if (!finiteF(rad)) return 0.0f;
 
-	while (rad >  ATT_PI) rad -= 2.0f * ATT_PI;
-	while (rad < -ATT_PI) rad += 2.0f * ATT_PI;
-	return rad;
+	// Branchless and BOUNDED, the same form ESEKF.cpp uses and for the same
+	// reason: a `while (rad > pi) rad -= 2*pi` loop HANGS on a large finite
+	// input. Past about 1e8 the subtraction of 2*pi falls below the float ULP,
+	// so the value stops changing and the loop never exits -- a frozen flight
+	// loop from one bad heading, with no fault anywhere that names the cause.
+	if (rad >= -ATT_PI && rad <= ATT_PI) {
+		return rad;   // the overwhelmingly common case
+	}
+
+	const float two_pi = 2.0f * ATT_PI;
+	float wrapped = rad - two_pi * floorf((rad + ATT_PI) / two_pi);
+
+	// Float rounding on a huge input can still leave this a hair outside, and
+	// everything downstream treats the range as a guarantee rather than an
+	// aspiration. An angle that large carries no information anyway -- all of
+	// its precision went into the exponent -- so clamping loses nothing real.
+	if (wrapped >  ATT_PI) wrapped =  ATT_PI;
+	if (wrapped < -ATT_PI) wrapped = -ATT_PI;
+	return wrapped;
 }
 
 Quaternionf Attitude::attitudeFromEuler(float roll_rad, float pitch_rad,

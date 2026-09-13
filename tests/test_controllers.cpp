@@ -203,6 +203,45 @@ int main(void)
 	}
 
 	// -----------------------------------------------------------------------
+	section("wrapPi terminates on every finite input");
+	// -----------------------------------------------------------------------
+	{
+		checkNear(Attitude::wrapPi(0.5f), 0.5f, 1e-6f, "in range, unchanged");
+		checkNear(Attitude::wrapPi(3.5f), 3.5f - 2.0f*3.14159265f, 1e-5f,
+				"just over pi wraps negative");
+		checkNear(Attitude::wrapPi(-3.5f), -3.5f + 2.0f*3.14159265f, 1e-5f,
+				"just under -pi wraps positive");
+		checkNear(Attitude::wrapPi(2.0f*3.14159265f + 1.0f), 1.0f, 1e-4f,
+				"a full turn plus 1 rad wraps to 1 rad");
+		checkNear(Attitude::wrapPi(-6.0f*3.14159265f - 1.0f), -1.0f, 1e-4f,
+				"three turns the other way, likewise");
+		// Exactly +/-pi is the boundary, where both signs name the same angle,
+		// so only the magnitude is meaningful.
+		checkNear(std::fabs(Attitude::wrapPi(7.0f*3.14159265f)), 3.14159265f,
+				1e-4f, "an odd multiple of pi lands on the boundary");
+
+		// The one that matters: a naive `while (rad > pi) rad -= 2*pi` never
+		// terminates here, because 2*pi is below the ULP at this magnitude.
+		// If this check is reached at all, the loop returned.
+		const float huge = Attitude::wrapPi(1e30f);
+		check(std::isfinite(huge) && std::fabs(huge) <= 3.14159266f,
+				"a huge finite input RETURNS, in range");
+		const float huge_neg = Attitude::wrapPi(-1e30f);
+		check(std::isfinite(huge_neg) && std::fabs(huge_neg) <= 3.14159266f,
+				"...and so does a huge negative one");
+		checkNear(Attitude::wrapPi(std::nanf("")), 0.0f, 1e-9f,
+				"a non-finite input gives zero rather than spinning");
+
+		// Reached through the public API, which is how a broken mode layer
+		// would actually deliver it.
+		Attitude att;
+		att.reset(Attitude::attitudeFromEuler(0.0f, 0.0f, 0.0f));
+		att.setEuler(0.0f, 0.0f, 1e30f);
+		check(std::isfinite(att.getHeadingTarget()),
+				"a garbage heading through setEuler() does not hang the loop");
+	}
+
+	// -----------------------------------------------------------------------
 	section("Engaging");
 	// -----------------------------------------------------------------------
 	{
