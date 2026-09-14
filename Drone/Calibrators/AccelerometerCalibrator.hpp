@@ -54,9 +54,13 @@
 //
 // A position needs SAMPLES_PER_POSITION consecutive good samples and progress
 // climbs with each one, so a healthy run never gaps at all. The allowance is
-// for an operator still settling the airframe after sending READY. At the
-// 200 Hz this is fed at -- see CALIBRATOR_ACCEL_FEED_HZ -- it is about 50
-// seconds of no progress.
+// for an operator still settling the airframe after sending READY.
+//
+// This is a SAMPLE COUNT, and nothing in this class measures time -- so what it
+// means in seconds is set entirely by how fast the caller feeds it. It was
+// chosen against a 200 Hz feed, where it is about 50 seconds. Feed it from a
+// 1 kHz loop and the same number is 10 seconds, which an operator settling an
+// airframe can easily exceed. Decimate the feed, or rescale this.
 #define ACCEL_CAL_SIXPOS_STALL_LIMIT   10000U
 
 // Smallest usable nominal 1 g magnitude. Purely a divide-by-zero guard -- the
@@ -65,6 +69,9 @@
 #define ACCEL_CAL_MIN_RADIUS           1e-6f
 
 // Standard gravity, matching ICM42688P's raw -> m/s^2 conversion.
+// Not read inside this class -- it is unit-agnostic -- but the integrating
+// project needs a name for the constant that turns a corrected reading into
+// m/s^2, and defining it beside the calibrator keeps the two from drifting.
 #define ACCEL_CAL_STANDARD_GRAVITY     9.80665f
 
 enum class AccelPosition : uint8_t {
@@ -116,6 +123,8 @@ public:
     void beginSixPosition(float motion_threshold = 0.5f);
     void startPosition(AccelPosition pos);
     bool isPositionDone(AccelPosition pos) const;
+    // Which position startPosition() last selected. Used by a driving layer
+    // to name the face it is currently asking the operator to hold.
     AccelPosition getCurrentPosition() const { return _current_pos; }
     bool allPositionsComplete() const;
 

@@ -101,8 +101,13 @@ public:
     CompassCalibrator();
 
     // sample_buffer / capacity: where the samples are collected. Caller-owned,
-    // must outlive the procedure. See CALIBRATOR_SAMPLE_ARENA
-    // for why this is a parameter and not a member array.
+    // must outlive the procedure.
+    //
+    // A parameter rather than a member array so the ~3.6 kB it costs is the
+    // integrator's to place. A procedure that runs for a few seconds on the
+    // ground and never again has no business holding that permanently in .bss
+    // on a part where it is a meaningful fraction of the RAM -- and on a part
+    // where it is not, passing a static array costs nothing.
     //
     // Returns false -- and does NOT start -- if the buffer is null or smaller
     // than COMPASS_CAL_MIN_SAMPLES, which could never complete.
@@ -122,6 +127,9 @@ public:
     CalStatus calibrate();
 
     CalStatus getStatus() const { return _status; }
+    // Raw collection progress, for a driving layer that reports it to an
+    // operator: how many samples were kept, and how many of the
+    // COMPASS_CAL_NUM_BINS direction bins they cover.
     uint16_t getSampleCount() const { return _sample_count; }
     uint8_t getFilledBinsCount() const { return _filled_bins; }
 
