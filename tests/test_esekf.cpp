@@ -221,15 +221,18 @@ int main()
         Vector3f before = k.getEulerAngles();
         check(k.getFaultCount() == 0, "no faults during normal operation");
 
-        // Drive P to the edge of float range with a legal value; the next
-        // F P F^T then overflows. Every public setter screens its input, so
-        // this is how a fault actually arises rather than being injected.
-        float P[ESEKF_STATE_DIM][ESEKF_STATE_DIM];
-        k.getCovariance(P);
-        for (int i = 0; i < ESEKF_STATE_DIM; i++)
-            for (int j = 0; j < ESEKF_STATE_DIM; j++) P[i][j] = (i == j) ? 3.0e38f : 0.0f;
-        k.setCovariance(P);
-        k.predict(Vector3f(0.5f, 0.5f, 0.5f), restAccel(0,0), 0.0025f);
+        // Drive P to the edge of float range through a legal public setter: an
+        // enormous process noise is finite and non-negative, so it is accepted,
+        // and predict() folds it into P where F P F^T then overflows. Every
+        // public setter screens its input, so this is how a fault actually
+        // arises rather than being injected.
+        k.setProcessNoiseGyro(3.0e38f);
+        // Gyro held at zero: the covariance blows up from Q alone, so any
+        // attitude change after the repair is the repair's doing and not real
+        // rotation the filter correctly integrated on the way in.
+        for (int i = 0; i < 20 && k.getFaultCount() == 0; i++)
+            k.predict(Vector3f(0, 0, 0), restAccel(0,0), ESEKF_MAX_PREDICT_DT);
+        k.setProcessNoiseGyro(2.5e-5f); // back to the constructor's default
 
         check(k.getFaultCount() >= 1, "the fault is counted");
         check(!k.hasDiverged(), "the filter repairs instead of latching");
@@ -261,17 +264,36 @@ int main()
         const float good = k.getAccelGateThreshold();
         k.setAccelGateThreshold(NAN);
         checkNear(k.getAccelGateThreshold(), good, 1e-6f, "NaN gate threshold rejected");
-        const float baro = k.getBaroNoise();
+        // The rest of the guards are checked through BEHAVIOUR rather than a
+        // read-back accessor, because the filter carries no getters for these.
+        // That is the stronger test anyway: each value below, if it were
+        // actually stored, poisons an update path within a few samples -- a
+        // negative variance makes the barometer's innovation covariance
+        // singular, a NaN gravity poisons every accelerometer innovation, and
+        // a NaN R poisons the Kalman gain and with it the whole state. A
+        // filter that keeps estimating cleanly through them is the evidence
+        // they were refused.
+        const Vector3f before = k.getEulerAngles();
+        const uint32_t faults_before = k.getFaultCount();
+
         k.setBaroNoise(-1.0f);
-        checkNear(k.getBaroNoise(), baro, 1e-6f, "negative baro variance rejected");
-        Vector3f g0 = k.getGravity();
         k.setGravity(Vector3f(NAN, 0, 0));
-        checkNear(k.getGravity().z, g0.z, 1e-6f, "NaN gravity rejected");
         float Rbad[3][3] = {{NAN,0,0},{0,1,0},{0,0,1}};
-        float Rwas[3][3]; k.getAccelNoise(Rwas);
         k.setAccelNoise(Rbad);
-        float Rnow[3][3]; k.getAccelNoise(Rnow);
-        checkNear(Rnow[0][0], Rwas[0][0], 1e-9f, "NaN measurement noise rejected");
+        float Rbad_mag[3][3] = {{0,0,0},{0,NAN,0},{0,0,0}};
+        k.setMagNoise(Rbad_mag);
+
+        // Exercise every path the refused values would have reached.
+        settle(k, 0, 0, 25.0f * D2R, 5.0f);
+        for (int i = 0; i < 20; i++) k.updateBarometer(0.0f);
+
+        check(k.getFaultCount() == faults_before, "refused values cause no numerical fault");
+        check(!k.hasDiverged(), "the filter survives every refused setter");
+        check(k.isInitialized(), "and stays initialized");
+        checkNear(k.getEulerAngles().x * R2D, before.x * R2D, 1.0f,
+                  "roll is untouched by the refused setters");
+        checkNear(k.getEulerAngles().z * R2D, 25.0f, 1.0f,
+                  "and the filter still converges normally");
     }
 
     return testReport("ESEKF");
