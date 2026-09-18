@@ -759,9 +759,14 @@ void Drone::reportDiagnostics(void) {
 	// Also worth knowing that on an F7 the instruction cache and the ART
 	// accelerator are OFF unless main() enables them, which alone is worth
 	// several times the execution speed out of flash.
+	// HAL_GetTickFreq() returns an enum, so pairing it with a plain 1u in the
+	// conditional left the two arms of the ?: with different types -- correct
+	// arithmetic, but a -Wextra diagnostic on every build of this file. Widened
+	// once into a local, which also stops the HAL call being made twice.
+	const unsigned tick_freq_hz = (unsigned) HAL_GetTickFreq();
 	telemetry.send("$DIAG,CLOCK hz=%lu tickhz=%lu",
 			(unsigned long) SystemCoreClock,
-			(unsigned long) (1000u / (HAL_GetTickFreq() ? HAL_GetTickFreq() : 1u)));
+			(unsigned long) (1000u / (tick_freq_hz ? tick_freq_hz : 1u)));
 
 	// How this binary was BUILT, which is the difference between the estimator
 	// costing 150 us and costing 2.5 ms. None of it is visible from any other
